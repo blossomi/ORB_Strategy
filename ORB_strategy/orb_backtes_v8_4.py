@@ -191,14 +191,18 @@ def build_day_last_bar_map() -> dict[ddate, dtime]:
 # 策略
 # ---------------------------------------------------------------------------
 class OrbStrategyConfig(StrategyConfig):
+    # 全部字段必填, 不给默认值 —— 漏传参数直接报错。
+    # 这里原来挂着一套过时默认值 (0.01 / 20.0 / 0.05 / 4000 / 10.0 / 2 tick):
+    # 主流程每次都显式传参所以它不生效, 但任何漏传的地方都会静默拿到与「参数开关区」
+    # 完全不同的配置 (乘数差 10 倍、手数上限差 20 倍), 不报错、不告警。
     instrument_id: str
     bar_type: str
-    risk_per_trade: float = 0.01
-    multiplier: float = 20.0
-    atr_stop_fraction: float = 0.05
-    max_qty: int = 4000
-    be_r_multiple: float = 10.0               # 浮盈达 10R → 拉保本
-    be_buffer_ticks: int = 2                  # 保本缓冲 tick 数
+    risk_per_trade: float
+    multiplier: float
+    atr_stop_fraction: float
+    max_qty: int
+    be_r_multiple: float
+    be_buffer_ticks: int
 
 
 class OrbStrategy(Strategy):

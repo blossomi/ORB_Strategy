@@ -32,8 +32,8 @@ bars, instrument, bar_type = V.build_bars_and_instrument()
 print(f"窗口 {V.START_DATE}~{V.END_DATE}, bars={len(bars)}", flush=True)
 
 venue = Venue(V.VENUE)
-acct_start = pd.Timestamp(V.START_DATE)
-acct_end = pd.Timestamp(V.END_DATE)
+acct_start = pd.Timestamp(V.START_DATE, tz=V.ET)
+acct_end = pd.Timestamp(V.END_DATE, tz=V.ET)
 df = pd.read_parquet(V.DATA_PATH).tz_convert(V.ET)
 df = df[(df.index >= acct_start) & (df.index < acct_end + pd.Timedelta(days=1))]
 years = (df.index[-1] - df.index[0]).days / 365.25
