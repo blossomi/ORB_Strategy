@@ -4,19 +4,21 @@ orb_backtest_v8_4.py
 ====================
 NQ 期货 5 分钟 ORB 日内策略 —— NautilusTrader 版本 (v8.4)
 
-v8.4: 在 v8.3 改版基础上新增「浮盈达 10R 后拉保本 (BE)」
-  - 区间: 9:00-9:30 ET 的高低价 (盘前 30 分钟, 从 ETH 数据计算)
-  - 入场: 窗口 9:30-9:50, 逐根 K 线收盘价判断
+v8.4: 在 v8.3 改版基础上新增「浮盈达 N R 后拉保本 (BE)」
+  - 区间: 盘前时段的最高/最低价 (从 ETH 数据计算)
+  - 入场: 入场窗口内逐根 K 线收盘价判断
       收盘价涨破区间高点 → 做多
       收盘价跌破区间低点 → 做空
-      第一根在区间内则等下一根, 9:50 前无方向则不交易
+      第一根在区间内则等下一根, 窗口结束前无方向则不交易
   - 修复: 用收盘价(单一值)判断方向, 消除"最高/最低价同时越界"的歧义
       (v8.1/v8.2 用 bar.high/bar.low 触及判断, 26% 交易日会两边同时突破被误判为做多)
-  - 止损: 5% × 14日ATR (前一日, 无未来函数)
+  - 止损: ATR_STOP_FRACTION × ATR_PERIOD 日 ATR (前一日, 无未来函数)
   - 止盈: 无 (持有至收盘平仓, 不封顶, 保留长尾大赢家)
-  - 保本 (v8.4 新增): 浮盈达 10R 时把止损拉到「保本 + 2 tick 缓冲」
-      (缓冲覆盖点差 0.25 + 手续费 ~0.05, 对齐 v6 的保本定义)
-  - 仓位: 以损定仓 floor(equity × 1% / (止损点数 × $20)), 单笔最大 4000 手
+  - 保本 (v8.4 新增): 浮盈达 BE_R_MULTIPLE R 时把止损拉到「保本 + BE_BUFFER_TICKS tick」
+  - 仓位: 以损定仓 floor(equity × RISK_PER_TRADE / (止损点数 × MULTIPLIER)), 单笔最大 MAX_QTY 手
+
+注意: 上面这些值全部来自下方「参数开关区」, 正文不再复写具体数字 ——
+      历史上这里写死的 5%ATR / 10R / $20 / 4000 手都曾与代码脱节, 造成版本对比错误。
 
 ★ 所有可调参数都集中在下方「配置 / 参数开关区」, 改数值即可, 无需动策略代码。
 
@@ -73,8 +75,11 @@ END_DATE = "2026-08-30"                            # 样本窗口止
 # ---- 合约 / 基础设施 (NQ) ----
 INSTRUMENT_ID = "NQ.GLBX"                          # 合成"连续"合约
 VENUE = "GLBX"
-MULTIPLIER = 2.0                                  # MNQ $20/点
-# MULTIPLIER = 20.0                                  # NQ $20/点
+# 合约乘数 = 每点美元数。它同时决定仓位手数: qty = 风险预算 / (止损点数 × MULTIPLIER)
+#   MNQ(微型) = $2/点  → 2.0   ($25k 小账户也能连续交易, 无"买不起 1 手"的样本缺口)
+#   NQ (标准) = $20/点 → 20.0  (同样 $25k 下有 68% 的交易日买不起 1 手, 样本会被切碎)
+# 注意: 价格数据本身是 NQ 报价, 这里只切换结算口径 (每点值), 不改数据。
+MULTIPLIER = 2.0
 TICK = 0.25
 PRICE_PRECISION = 2
 
@@ -88,7 +93,7 @@ T_WIN_END     = dtime(10, 10)          # 入场窗口结束 10:10 (无突破则�
 
 # ---- 保本 ----
 BE_R_MULTIPLE = 3.0            # 浮盈达 N R → 拉止损到保本 (一次性, 之后持有到收盘)
-BE_BUFFER_TICKS = 0            # 保本缓冲 = 2 tick = 0.50pt (点差 0.25 + 手续费 ~0.05)
+BE_BUFFER_TICKS = 0            # 保本缓冲 (tick): 0 = 止损正好在入场价, 覆盖点差需 >=1
 
 # ---- 止损 (论文方案) ----
 ATR_PERIOD = 14                # ATR 周期
@@ -97,13 +102,16 @@ ADJUST_STOP_TO_RISK = True     # 反推止损: floor 取整后按整数手数微
 
 # ---- 仓位 ----
 STARTING_CAPITAL = 25000      # 起始资金(美元)
-RISK_PER_TRADE = 0.007          # 每笔风险 = 权益的 1% (复利)
+RISK_PER_TRADE = 0.007          # 每笔风险 = 权益的 0.7% (复利)
 MAX_QTY = 200                  # 单笔最大手数上限
 
 
 # ---- 成本 ----
 COMMISSION_PER_CONTRACT = 0.5  # 手续费 $/手/边
-SLIPPAGE = 2                   # 滑点(0=无)
+# 滑点(每手每边, 单位=tick)。这里不使用 Nautilus 的 FillModel:
+#   bar 回测里 FillModel 以 bar 的高/低点当盘口基准, 实测会把止损成交价罚掉 6-10 点(假滑点),
+#   故按「N tick × 每 tick 点值」线性折算成每手每边的成本 (对市价进出策略, 与成交价滑点在 PnL 上等价)。
+SLIPPAGE_TICKS = 1             # 1 tick = 0.25pt = $0.50/手/边 (0.25 × MULTIPLIER 2.0); 0 = 无滑点
 
 LWC_CDN = "https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"
 
@@ -120,9 +128,10 @@ STRATEGY_DESC = f"""\
 止损       : {ATR_STOP_FRACTION:.1%} × {ATR_PERIOD}日ATR (前一日, 无未来函数)
 止盈       : 无 (持有至收盘, 收盘=当日实际最后一根K线)
 保本       : 浮盈达 {BE_R_MULTIPLE:g}R → 拉止损到「保本 + {BE_BUFFER_TICKS} tick」, 之后持有到收盘
-仓位       : floor(equity × {RISK_PER_TRADE:.1%} / (止损点数 × $20)), 单笔最大 {MAX_QTY} 手
+仓位       : floor(equity × {RISK_PER_TRADE:.1%} / (止损点数 × {MULTIPLIER:g})), 单笔最大 {MAX_QTY} 手
 反推止损   : {'开 (按整数手数微调止损, 风险精确=名义)' if ADJUST_STOP_TO_RISK else '关'}
-手续费     : ${COMMISSION_PER_CONTRACT}/手/边, 滑点:${SLIPPAGE}"""
+每手乘数   : ${MULTIPLIER:g}/点 ({'MNQ 微型' if MULTIPLIER <= 2 else 'NQ 标准'}), {int(round(1 / TICK))} tick/点
+成本       : 手续费 ${COMMISSION_PER_CONTRACT}/手/边 + 滑点 {SLIPPAGE_TICKS} tick/手/边 (线性折算成本, 未走 FillModel)"""
 
 def tick_round(px: float) -> float:
     """把价格/点数取整到最小变动价位 0.25 的倍数。"""
@@ -765,7 +774,11 @@ if __name__ == "__main__":
         account_type=AccountType.MARGIN,
         base_currency=USD,
         starting_balances=[Money(STARTING_CAPITAL, USD)],
-        fee_model=PerContractFeeModel(Money(COMMISSION_PER_CONTRACT, USD)),
+        # 成本 = 手续费 + 滑点 (每手每边)。滑点以成本折算, 不走 FillModel ——
+        # 理由见参数区 SLIPPAGE_TICKS 注释 (bar 回测里 FillModel 会把止损成交价罚掉 6-10 点)。
+        fee_model=PerContractFeeModel(
+            Money(COMMISSION_PER_CONTRACT + SLIPPAGE_TICKS * TICK * MULTIPLIER, USD)
+        ),
     )
     engine.add_instrument(instrument)
     engine.add_data(bars)
