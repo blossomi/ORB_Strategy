@@ -1,0 +1,20 @@
+# ---------- 环境 / 缓存（体积大，可重建） ----------
+.venv/
+.uv_cache/
+.uv_pkg_cache/
+__pycache__/
+*.pyc
+.DS_Store
+
+# ---------- 原始行情数据（几百 MB，留在本地，不进版本库） ----------
+*.parquet
+GLBX-20260831-NQ&ES/
+XNAS-TQQQSQQQ_2018-2026/
+
+# ---------- 旧 Windows 会话导入（体积 + 隐私） ----------
+_import_staging/
+dsh-session-session-*/
+
+# ---------- 生成物：大 HTML 图不进库，小产物(csv/png)进库 ----------
+ORB_strategy/html_output/*.html
+*.log

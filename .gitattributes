@@ -1,0 +1,4 @@
+# 回测产物 CSV 由 Windows 工具生成过、带 CRLF，禁止 git 做换行转换，
+# 否则每次 git 状态都会显示这些文件"被修改"。
+*.csv -text
+*.py text eol=lf

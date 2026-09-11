@@ -1,0 +1,60 @@
+//@version=5
+// ============================================================================
+// ORB 止损 + 仓位标注 —— 每个交易日 9:30 K 线附近标注当日止损点数与可开手数
+// 止损点数 = ATR止损百分比% × 前一日14日ATR（当天固定，无未来函数）
+// 可开手数 = floor( 当前本金 × 每笔风险比例%  /  (止损点数 × 每点价值) )
+//   每点价值用 syminfo.pointvalue 自动取当前标的（NQ=20, ES=50, 股票/ETF=1）
+// 参考论文《Can Day Trading Really Be Profitable?》第 4 节：
+//   "a stop ... equal to 5% of the 14-day ATR"
+// ============================================================================
+indicator("5% × 14日ATR 止损+手数标注（9:30）", shorttitle="ATR止损手数", overlay=true)
+
+// ---------- 止损参数 ----------
+pctInput = input.float(5.0, "ATR 止损百分比 %", minval=0.0, step=0.5, group="止损")
+atrLen   = input.int(14, "ATR 周期", minval=1, group="止损")
+atrTfIn  = input.timeframe("D", "ATR 周期来源（默认日线）", group="止损")
+tickSize = input.float(0.25, "最小变动价位 tick（用于取整）", minval=0.01, group="止损")
+
+// ---------- 仓位参数 ----------
+capital = input.float(25000, "当前本金", minval=0.0, step=1000, group="仓位")
+riskPct = input.float(1.0, "每笔风险比例 %（本金）", minval=0.0, step=0.1, group="仓位")
+maxQty  = input.int(0, "最大手数上限（0=不限）", minval=0, group="仓位")
+
+// ---------- 交易时段 ----------
+openTm  = input.string("0930", "开盘时间 (HHmm)", group="交易时段")
+closeTm = input.string("1600", "收盘时间 (HHmm)", group="交易时段")
+tz      = input.string("America/New_York", "时区", group="交易时段")
+
+// ---------- 前一日 14 日 ATR（当天固定，无未来函数） ----------
+atrTf   = atrTfIn == "" ? timeframe.period : atrTfIn
+prevAtr = request.security(syminfo.tickerid, atrTf, ta.atr(atrLen)[1])
+
+// ---------- 止损点数 = ATR止损百分比% × 前一日ATR，按 tick 取整（至少 1 tick） ----------
+pct      = pctInput / 100.0
+rawDist  = pct * prevAtr
+stopDist = math.max(tickSize, math.round(rawDist / tickSize) * tickSize)
+
+// ---------- 可开手数（按当前标的每点价值自动计算） ----------
+pv      = syminfo.pointvalue          // 每点价值：NQ=20, ES=50, 股票/ETF=1
+riskAmt = capital * riskPct / 100.0   // 每笔愿意承担的风险金额
+perUnit = stopDist * pv               // 每手止损金额
+qty     = perUnit > 0 ? math.floor(riskAmt / perUnit) : na
+if not na(qty) and maxQty > 0
+    qty := math.min(qty, maxQty)
+
+// ---------- 定位每个交易日的 9:30 K 线 ----------
+sessStr  = openTm + "-" + closeTm + ":1234567"
+inSess   = not na(time(timeframe.period, sessStr, tz))
+firstBar = inSess and not inSess[1]
+
+// ---------- 在 9:30 K 线附近标注当日数据 ----------
+if firstBar and not na(stopDist)
+    qtyStr = na(qty) ? "—" : str.tostring(qty, "#")
+    txt = "止损 " + str.tostring(pctInput, "#.#") + "% × " + str.tostring(atrLen) + "日ATR = " + str.tostring(stopDist, "#.##") + "点" +
+          "\n前日ATR " + str.tostring(prevAtr, "#.##") +
+          "\n每笔风险 $" + str.tostring(riskAmt, "#.##") + "（" + str.tostring(riskPct, "#.#") + "%）" +
+          "\n每点价值 $" + str.tostring(pv, "#.##") +
+          "\n可开手数 " + qtyStr
+    label.new(bar_index, high, txt, style=label.style_label_down,
+         color=color.new(color.navy, 0), textcolor=color.white, size=size.small,
+         textalign=text.align_left)
