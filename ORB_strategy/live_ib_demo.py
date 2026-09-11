@@ -66,15 +66,28 @@ TICK = 0.25                     # NQ/MNQ 最小变动 = 0.25 pt
 MULTIPLIER = 2.0 if SYMBOL == "MNQ" else 20.0
 
 DRY_RUN = True                  # True: 只记信号不下单 (先跑这个!)
-ORDER_QTY = 20                  # 下单手数。实盘试水建议从 1 手 MNQ 起
+ORDER_QTY = 20                  # 下单手数。⚠️ 20 手 NQ = 名义 $1.16M, paper 账户保证金未必够;
+                                #    实盘试水建议 ORDER_QTY=1 + SYMBOL="MNQ"
 STOP_PTS = 30.0                 # 止损点数。回测是 7.5%×前日14日ATR, 实盘先固定, 之后按当日 ATR 覆盖
+
+# 行情类型: 订阅实时 CME 数据包之后**必须**改成 REALTIME ——
+# 否则 adapter 仍按延迟数据发请求, 订阅白买(且延迟数据不能用于下单/测滑点)。
+MARKET_DATA_TYPE = MarketDataTypeEnum.REALTIME
+# MARKET_DATA_TYPE = MarketDataTypeEnum.DELAYED_FROZEN   # 未订阅时只能退回这个
 
 # ORB 参数 (对齐回测 v8.4 的当前配置)
 T_RANGE_START = time(9, 0)      # 盘前区间开始
 T_RANGE_END = time(9, 29)       # 盘前区间结束
 T_WIN_START = time(9, 30)       # 入场窗口开始
 T_WIN_END = time(10, 10)        # 入场窗口结束 (无突破则当日放弃)
-T_FLAT = time(15, 55)           # 收盘清仓
+T_FLAT = time(15, 55)           # 常规日收盘清仓
+
+# ⚠️ 半日市(提前 13:00 收盘): 这些日期根本没有 15:55 的 bar, 用 T_FLAT 会导致
+#    **持仓整夜不平**。回测脚本靠"当日实际最后一根 bar"解决, 实盘只能预先列日期。
+#    每年更新一次 (CME 惯例: 感恩节次日 / 圣诞前夕 / 独立日前夕)。
+#    2026 年剩余: 11-27(感恩节次日)、12-24(圣诞前夕)。已过: 07-03。
+HALF_DAY_FLAT = time(12, 50)
+HALF_DAYS = {"2026-11-27", "2026-12-24"}
 
 SLIP_CSV = "live_slippage.csv"  # 滑点落盘文件 (追加写)
 SLIP_STALE_MS = 2000            # 信号→成交 超过 2 秒即标 stale (正常 IB 往返 < 500ms)
@@ -144,6 +157,9 @@ class OrbLiveStrategy(Strategy):
         d, hhmm = t.date(), t.time()
 
         if d != self._day:                       # 新交易日: 重置区间与状态
+            if self._day is not None:
+                # 清掉昨日残留挂单(例如止损一直没触发、或收盘平仓失败留下的单)
+                self.cancel_all_orders(self.instrument_id)
             self._day = d
             self._rng_hi = self._rng_lo = None
             self._entered_today = False
@@ -169,18 +185,23 @@ class OrbLiveStrategy(Strategy):
                 elif c < self._rng_lo:
                     self._on_signal(OrderSide.SELL, bar, c)
 
-        # ③ 收盘清仓
-        if hhmm >= T_FLAT:
+        # ③ 收盘清仓 (半日市提前到 HALF_DAY_FLAT, 否则当天没有 15:55 的 bar → 整夜不平)
+        flat_at = HALF_DAY_FLAT if str(d) in HALF_DAYS else T_FLAT
+        if hhmm >= flat_at:
             self._flatten(bar)
 
     # ---------------- 信号 / 下单 ----------------
     def _on_signal(self, side: OrderSide, bar: Bar, px: float):
         self._entered_today = True
         ref = f"entry-{bar.ts_event}"
-        # ① 先登记信号价 —— 必须在下单之前, 否则延迟会漏进滑点
+        # ① 先登记信号价 —— 必须在下单之前, 否则下单耗时会漏进滑点。
+        #    signal_ts 用 clock 的墙钟时间, 不是 bar.ts_event: IB adapter 给的是 bar 的
+        #    **开始**时间, 而 bar 是在结束时才推送, 用 bar.ts_event 会让每笔 latency
+        #    虚增一整根 bar(5 分钟) → 全部样本被标 stale, 采集作废。
         self.slip.note_signal(ref, kind="entry", side=side.name,
-                              qty=float(self.quantity), signal_px=px,
-                              signal_ts_ns=bar.ts_event)
+                              qty=self.quantity.as_double(), signal_px=px,
+                              signal_ts_ns=self.clock.timestamp_ns(),
+                              bar_ts_ns=bar.ts_event)
         self.log.info(f"[信号] {side.name} @ {px:.2f}  "
                       f"(区间 {self._rng_lo:.2f} ~ {self._rng_hi:.2f}, 手数 {self.quantity})")
 
@@ -195,15 +216,33 @@ class OrbLiveStrategy(Strategy):
         self.submit_order(order)
 
     def _place_stop(self, fill_px: float, fill_ts_ns: int):
-        """入场成交后挂止损。止损单的滑点 = 触发价 vs 实际成交价。"""
+        """入场成交后挂/调止损。止损单的滑点 = 触发价 vs 实际成交价。
+
+        ⚠️ 分笔成交时**绝不能重复 submit** —— 否则市场里会同时存在两张止损单,
+        触发时把手数平两次(实盘直接被达成反向)。已有挂单就改数量。
+        """
         side = OrderSide.SELL if self._entry_side == OrderSide.BUY else OrderSide.BUY
         trig = fill_px - self.stop_pts if side == OrderSide.SELL else fill_px + self.stop_pts
         trig = round(round(trig / TICK) * TICK, 2)
         self._stop_trigger = trig
 
+        # ⚠️ 必须用 `not is_closed`, 不能用 is_open!
+        #    Nautilus 的 is_open 只在 ACCEPTED/TRIGGERED/PARTIALLY_FILLED 等状态为 True,
+        #    **不含 INITIALIZED/SUBMITTED**; 而填单回调与 submit_order 可能在同一批消息里,
+        #    此时订单还是 SUBMITTED -> is_open=False -> 判断失效 -> 又挂一张止损单(实测
+        #    31 笔入场挂了 62 张)。is_closed 只对 DENIED/REJECTED/CANCELED/EXPIRED/FILLED 为 True。
+        if self._stop_order is not None and not self._stop_order.is_closed:
+            self.modify_order(
+                self._stop_order,
+                quantity=Quantity.from_str(str(self._filled_qty)))
+            self.log.info(f"止损单数量改为 {self._filled_qty} 手 (分笔成交只此一张)")
+            return
+
         ref = f"stop-{fill_ts_ns}"
-        self.slip.note_signal(ref, kind="stop", side=side.name, qty=float(self._filled_qty),
-                              signal_px=trig, trigger_px=trig, signal_ts_ns=None)
+        # signal_ts 留空: 止损的触发时刻我们拿不到, latency 对止损无意义, 不参与 staleness 判定
+        self.slip.note_signal(ref, kind="stop", side=side.name, qty=self._filled_qty,
+                              signal_px=trig, trigger_px=trig, signal_ts_ns=None,
+                              bar_ts_ns=fill_ts_ns)
         self._stop_order = self.order_factory.stop_market(
             instrument_id=self.instrument_id, order_side=side,
             quantity=Quantity.from_str(str(self._filled_qty)),
@@ -220,7 +259,8 @@ class OrbLiveStrategy(Strategy):
         ref = f"eod-{bar.ts_event}"
         px = bar.close.as_double()
         self.slip.note_signal(ref, kind="eod", side=side.name, qty=float(abs(pos)),
-                              signal_px=px, signal_ts_ns=bar.ts_event)
+                              signal_px=px, signal_ts_ns=self.clock.timestamp_ns(),
+                              bar_ts_ns=bar.ts_event)
         self.log.info(f"[收盘] 平掉 {pos} 手")
         if self.dry_run:
             self.slip.note_skipped(ref, note="DRY_RUN: 收盘平仓信号")
@@ -278,7 +318,7 @@ def build_node() -> TradingNode:
         ibg_client_id=CLIENT_ID,
         instrument_provider=instrument_provider,
         routing=RoutingConfig(default=True),
-        market_data_type=MarketDataTypeEnum.DELAYED_FROZEN,  # 无实时订阅账户 → 延迟数据
+        market_data_type=MARKET_DATA_TYPE,   # 订阅实时数据包后必须是 REALTIME (见配置区说明)
         # 必须 False: 默认 True 只推 RTH bar(9:30 起), 盘前 9:00-9:29 的 bar 收不到,
         # 策略的区间会永远为空 → 整天不发信号(且不报错)。对应 IB 请求的 useRTH=False。
         use_regular_trading_hours=False,

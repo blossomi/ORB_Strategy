@@ -28,21 +28,27 @@ from __future__ import annotations
 import csv
 import os
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 FIELDS = [
     "ref", "kind", "side", "order_type", "qty", "signal_px", "trigger_px",
     "fill_px", "fill_qty", "cum_fill_qty", "cum_avg_px",
     "slip_pt", "slip_ticks", "slip_usd", "cum_slip_pt",
-    "signal_ts_et", "fill_ts_et", "latency_ms", "stale", "note",
+    "bar_ts_et", "signal_ts_et", "fill_ts_et", "latency_ms", "stale", "note",
 ]
 
 
 def _to_et(ns) -> str:
-    """纳秒时间戳 -> 美东时间字符串 (CST 用户看起来更直观)。"""
+    """纳秒时间戳 -> 美东时间字符串。
+
+    必须显式指定 America/New_York: 之前用 .astimezone() 取的是**本机时区**(CST/UTC+8),
+    字段却叫 *_et, 差 12-13 小时, 核对日志时会误导。
+    """
     if ns is None:
         return ""
     try:
-        return datetime.fromtimestamp(int(ns) / 1e9, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        dt = datetime.fromtimestamp(int(ns) / 1e9, tz=timezone.utc)
+        return dt.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     except Exception:                                            # noqa: BLE001
         return str(ns)
 
@@ -67,12 +73,21 @@ class SlippageTracker:
     # ------------------------------------------------------------------ #
     def note_signal(self, ref: str, *, kind: str, side: str, qty: float,
                     signal_px: float, signal_ts_ns=None,
-                    trigger_px: float | None = None, note: str = "") -> None:
-        """下单前调用。signal_px 是决策依据价(bar 收盘价); 止损单另给 trigger_px。"""
+                    bar_ts_ns=None, trigger_px: float | None = None, note: str = "") -> None:
+        """下单前调用。
+
+        signal_px   : 决策依据价 (触发信号那根 bar 的收盘价)
+        signal_ts_ns: **下单那一刻的墙钟时间** —— 必须用 clock.timestamp_ns(), 不能用
+                      bar.ts_event! IB adapter 给的是 bar 的"开始时间"(见
+                      market_data.py 的 _ib_bar_to_ts_event), 而 bar 是在结束时才推送,
+                      用 bar.ts_event 会让每笔的 latency 虚增一整根 bar(5 分钟),
+                      全部样本被标成 stale。
+        bar_ts_ns   : 信号所属 bar 的时间戳, 只用于事后核对(不参与 latency 计算)
+        """
         self._pending[str(ref)] = {
             "ref": str(ref), "kind": kind, "side": side.upper(), "qty": float(qty),
             "signal_px": float(signal_px), "trigger_px": trigger_px,
-            "signal_ts_ns": signal_ts_ns, "note": note,
+            "signal_ts_ns": signal_ts_ns, "bar_ts_ns": bar_ts_ns, "note": note,
             "cum_qty": 0.0, "cum_notional": 0.0,
         }
 
@@ -119,6 +134,7 @@ class SlippageTracker:
             "slip_pt": slip_pt, "slip_ticks": (slip_pt / self.tick if slip_pt is not None else None),
             "slip_usd": (slip_pt * fill_qty * self.multiplier if slip_pt is not None else None),
             "cum_slip_pt": cum_slip,
+            "bar_ts_et": _to_et(p.get("bar_ts_ns")),
             "signal_ts_et": _to_et(p["signal_ts_ns"]), "fill_ts_et": _to_et(fill_ts_ns),
             "latency_ms": latency,
             "stale": ("" if latency is None else (latency > self.stale_ms)),
@@ -145,6 +161,7 @@ class SlippageTracker:
             "ref": str(ref), "kind": p.get("kind", "signal"), "side": p.get("side", ""),
             "qty": p.get("qty", ""), "signal_px": p.get("signal_px", ""),
             "trigger_px": p.get("trigger_px") or "",
+            "bar_ts_et": _to_et(p.get("bar_ts_ns")),
             "signal_ts_et": _to_et(p.get("signal_ts_ns")), "note": note,
         })
         self._append(row)
