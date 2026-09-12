@@ -68,8 +68,8 @@ from nautilus_trader.trading.strategy import Strategy
 # ---- 数据源 (NQ) ----
 DATA_PATH = "nq_5min_rth.parquet"                  # 回测数据 (RTH 9:30-16:00)
 RANGE_DATA_PATH = "nq_5min_eth.parquet"            # 区间数据源 (盘前 9:00-9:30 用 ETH)
-# START_DATE = "2020-01-01"                          # 样本窗口起
-START_DATE = "2016-01-01"                          # 样本窗口起
+START_DATE = "2019-01-01"                          # 样本窗口起
+# START_DATE = "2016-01-01"                          # 样本窗口起
 END_DATE = "2026-08-30"                            # 样本窗口止
 
 # ---- 合约 / 基础设施 (NQ) ----
@@ -92,7 +92,7 @@ T_WIN_END     = dtime(10, 10)          # 入场窗口结束 10:10 (无突破则�
 # 收盘: 自动按当日实际最后一根 5min K 线平仓 (常规 15:55, 节假日半日更早, 避免跨夜)
 
 # ---- 保本 ----
-BE_R_MULTIPLE = 3.0            # 浮盈达 N R → 拉止损到保本 (一次性, 之后持有到收盘)
+BE_R_MULTIPLE = 5.0            # 浮盈达 N R → 拉止损到保本 (一次性, 之后持有到收盘)
 BE_BUFFER_TICKS = 0            # 保本缓冲 (tick): 0 = 止损正好在入场价, 覆盖点差需 >=1
 
 # ---- 止损 (论文方案) ----
