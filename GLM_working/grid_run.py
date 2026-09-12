@@ -25,15 +25,16 @@ WORKERS = 5
 
 def run_chunk(jobs):
     import orb_core_v84 as core
+    core.configure(jobs["mult"], jobs["slip"], jobs["capital"])
     data = core.build_data(START, END)
     out = []
-    for stop, be, risk in jobs:
-        m = core.run_backtest(stop, be, risk, data, CAPITAL)
+    for stop, be, risk in jobs["combos"]:
+        m = core.run_backtest(stop, be, risk, data, jobs["capital"])
         out.append(m)
         be_label = "无" if be is None else f"{be:g}R"
         print(f"  [done] stop={stop:.2%} be={be_label} 年化={m['annual']*100:6.1f}% "
-              f"MDD={m['mdd']*100:6.1f}% Calmar={m['calmar']:.2f} Sharpe={m['sharpe']:.2f}",
-              flush=True)
+              f"MDD={m['mdd']*100:6.1f}% Calmar={m['calmar']:.2f} Sharpe={m['sharpe']:.2f} "
+              f"买不起={m['n_cant_afford']}", flush=True)
     return out
 
 
@@ -42,16 +43,28 @@ def main():
     p.add_argument("--stops", required=True)
     p.add_argument("--bes", required=True, help="-1 = 不拉保本")
     p.add_argument("--risk", type=float, default=0.007)
-    p.add_argument("--out", default="results/grid_extra.csv")
+    p.add_argument("--slip", type=float, default=2.0, help="每手每边滑点 tick 数")
+    p.add_argument("--capital", type=float, default=250_000)
+    p.add_argument("--mult", type=float, default=20.0, help="每点乘数: NQ=20, MNQ=2")
+    p.add_argument("--out", default=None)
     args = p.parse_args()
 
     stops = [float(x) for x in args.stops.split(",")]
     bes = [None if float(x) < 0 else float(x) for x in args.bes.split(",")]
-    jobs = [(s, b, args.risk) for s in stops for b in bes]
+    combos = [(s, b, args.risk) for s in stops for b in bes]
+    mult_name = "MNQ" if args.mult <= 2 else "NQ"
+    out_csv = args.out or f"results/grid_slip{args.slip:g}_cap{args.capital/1000:g}k_{mult_name.lower()}.csv"
 
-    print(f"网格: {len(jobs)} 组合, {WORKERS} 进程, 全样本 {START}~{END}, "
-          f"risk={args.risk:.1%}, 本金 ${CAPITAL:,}", flush=True)
-    chunks = [jobs[i::WORKERS] for i in range(WORKERS)]
+    print(f"网格: {len(combos)} 组合, {WORKERS} 进程, 全样本 {START}~{END}, "
+          f"risk={args.risk:.1%}, 本金 ${args.capital:,.0f}, {mult_name} ${args.mult:g}/点, "
+          f"滑点 {args.slip:g} tick/手/边", flush=True)
+    # 按 round-robin 分配组合到进程
+    chunks = []
+    for i in range(WORKERS):
+        part = combos[i::WORKERS]
+        if part:
+            chunks.append(dict(combos=part, mult=args.mult, slip=args.slip,
+                               capital=args.capital))
     t0 = time.time()
     with ProcessPoolExecutor(max_workers=WORKERS) as ex:
         results = []
@@ -59,21 +72,20 @@ def main():
             results.extend(part)
     print(f"全部完成, 墙钟 {time.time()-t0:.0f}s\n", flush=True)
 
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(out_csv) or ".", exist_ok=True)
     cols = ["stop_frac", "be_r", "risk_per_trade", "annual", "mdd", "calmar",
             "sharpe", "sortino", "winrate", "pf", "n_trades", "n_be_moves",
             "n_stopped", "n_be_exits", "n_eod", "n_capped", "n_cant_afford",
             "final_equity"]
-    exists = os.path.exists(args.out)
-    with open(args.out, "a" if exists else "w", newline="", encoding="utf-8") as f:
+    exists = os.path.exists(out_csv)
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
-        if not exists:
-            w.writeheader()
+        w.writeheader()
         for m in results:
             row = dict(m)
             row["pf"] = 99.0 if m["pf"] == float("inf") else m["pf"]
             w.writerow(row)
-    print(f"已{'追加' if exists else '写入'} {args.out}")
+    print(f"已写入 {out_csv}")
 
     results.sort(key=lambda m: (m["stop_frac"], m["be_r"] if m["be_r"] is not None else 1e9))
     print(f"\n{'止损':>8} {'保本':>6} | {'年化':>8} {'MDD':>8} {'Calmar':>8} {'Sharpe':>7} "

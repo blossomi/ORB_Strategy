@@ -73,6 +73,23 @@ FEE_PER_SIDE = COMMISSION_PER_CONTRACT + SLIPPAGE_TICKS * TICK * MULTIPLIER
 DEFAULT_CAPITAL = 250_000       # 搜索用本金: 保证最宽止损(7.5%ATR×2026波动)×最低风险(0.3%)也买得起 1 手
 
 
+def configure(multiplier: float = 20.0, slippage_ticks: float = 2.0,
+              capital: float = 250_000) -> None:
+    """切换成本/合约口径 (worker 进程内在 build_data 之前调用)。
+
+    小本金场景应配 MNQ 乘数 2.0: NQ 标准合约在高波动年 (止损 15~35pt × $20) 每手风险
+    $300~700, $25k × 0.7% = $175 买不起 1 手, 样本出现大面积缺口 (硬规则 2)。
+    注意 R 口径下的摩擦近似等价: MNQ 1 tick ≈ NQ 2 tick
+    (每边摩擦/R = [佣金 + 滑点tick×0.25×乘数] / (止损pt×乘数):
+      MNQ 1tick = 1.0/(2×stop) = 0.50/stop;  NQ 2tick = 10.5/(20×stop) = 0.525/stop)。
+    """
+    global MULTIPLIER, SLIPPAGE_TICKS, FEE_PER_SIDE, DEFAULT_CAPITAL
+    MULTIPLIER = float(multiplier)
+    SLIPPAGE_TICKS = float(slippage_ticks)
+    FEE_PER_SIDE = COMMISSION_PER_CONTRACT + SLIPPAGE_TICKS * TICK * MULTIPLIER
+    DEFAULT_CAPITAL = float(capital)
+
+
 def tick_round(px: float) -> float:
     return round(round(px / TICK) * TICK, PRICE_PRECISION)
 
