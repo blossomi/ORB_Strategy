@@ -68,7 +68,7 @@ from nautilus_trader.trading.strategy import Strategy
 # ---- 数据源 (NQ) ----
 DATA_PATH = "nq_5min_rth.parquet"                  # 回测数据 (RTH 9:30-16:00)
 RANGE_DATA_PATH = "nq_5min_eth.parquet"            # 区间数据源 (盘前 9:00-9:30 用 ETH)
-# START_DATE = "2020-08-01"                          # 样本窗口起
+# START_DATE = "2020-01-01"                          # 样本窗口起
 START_DATE = "2016-01-01"                          # 样本窗口起
 END_DATE = "2026-08-30"                            # 样本窗口止
 
@@ -92,7 +92,7 @@ T_WIN_END     = dtime(10, 10)          # 入场窗口结束 10:10 (无突破则�
 # 收盘: 自动按当日实际最后一根 5min K 线平仓 (常规 15:55, 节假日半日更早, 避免跨夜)
 
 # ---- 保本 ----
-BE_R_MULTIPLE = 5.0            # 浮盈达 N R → 拉止损到保本 (一次性, 之后持有到收盘)
+BE_R_MULTIPLE = 3.0            # 浮盈达 N R → 拉止损到保本 (一次性, 之后持有到收盘)
 BE_BUFFER_TICKS = 0            # 保本缓冲 (tick): 0 = 止损正好在入场价, 覆盖点差需 >=1
 
 # ---- 止损 (论文方案) ----
@@ -111,7 +111,7 @@ COMMISSION_PER_CONTRACT = 0.5  # 手续费 $/手/边
 # 滑点(每手每边, 单位=tick)。这里不使用 Nautilus 的 FillModel:
 #   bar 回测里 FillModel 以 bar 的高/低点当盘口基准, 实测会把止损成交价罚掉 6-10 点(假滑点),
 #   故按「N tick × 每 tick 点值」线性折算成每手每边的成本 (对市价进出策略, 与成交价滑点在 PnL 上等价)。
-SLIPPAGE_TICKS = 2             # 1 tick = 0.25pt = $0.50/手/边 (0.25 × MULTIPLIER 2.0); 0 = 无滑点
+SLIPPAGE_TICKS = 1             # 1 tick = 0.25pt = $0.50/手/边 (0.25 × MULTIPLIER 2.0); 0 = 无滑点
 
 LWC_CDN = "https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"
 

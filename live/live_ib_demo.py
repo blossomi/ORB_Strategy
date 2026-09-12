@@ -19,9 +19,11 @@ NautilusTrader 实盘最小框架：连 IB Gateway (paper) → 订阅 NQ/MNQ 5 �
 
 用法
 ----
-  cd ORB_strategy && ../.venv/bin/python live_ib_demo.py            # 默认 DRY_RUN
+  cd live && ../.venv/bin/python live_ib_demo.py                  # 默认 DRY_RUN
   收工后看汇总:
-  ../.venv/bin/python -c "from slippage_tracker import SlippageTracker as T; print(T.summarize('live_slippage.csv'))"
+  cd live && ../.venv/bin/python -c "from slippage_tracker import SlippageTracker as T; print(T.summarize('live_slippage.csv'))"
+  上线前回归验证(改完策略逻辑必跑):
+  cd live && ../.venv/bin/python _verify_live_logic.py
 
 前置
 ----
