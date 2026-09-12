@@ -18,3 +18,8 @@ dsh-session-session-*/
 # ---------- 生成物：大 HTML 图不进库，小产物(csv/png)进库 ----------
 ORB_strategy/html_output/*.html
 *.log
+
+# ---------- live/ 运行记录 (本地保留的审计底稿, 不进库) ----------
+live/logs/
+live/live_slippage*.csv
+live/_verify_live_*.csv
