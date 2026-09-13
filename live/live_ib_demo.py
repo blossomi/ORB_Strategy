@@ -36,6 +36,26 @@ NautilusTrader 实盘最小框架：连 IB Gateway (paper) → 订阅 MNQ 5 分�
   控制台输出(含 nautilus/adapter 报错)用 nohup 重定向到 logs/nohup_<日期>.log。
   完整操作流程见同目录 OPERATIONS.md (操作手册)。
 
+移植路线图 (TODO 清单, 与代码内 TODO·P* 标记一一对应; 2026-09-13 更新)
+--------------------------------------------------------------------
+已完成 ✓ (真单前的 P0 逻辑缺口已补齐, 口径与回测 v8.4 / GLM_working REPORT.md 对齐):
+  ✓ ATR 动态止损: 7.5%×前日14日ATR (Wilder), 盘前拉日线计算, 失败用 ATR_OVERRIDE_PTS 兜底
+  ✓ BE 保本: 浮盈达 5R (盘中触及) → 现有止损单 modify 到保本价, 之后持有到收盘
+  ✓ 以损定仓: 0.7%×权益 floor 取整, MAX_QTY=50 安全帽
+  ✓ 运行日志: logs/live_*.log 每根 bar 留痕, 墙钟前缀可审计 bar 推送节奏 (见 OPERATIONS.md)
+
+待办 (按优先级; **全部完成前不要把 DRY_RUN 推进到真单**):
+  P1-1 □ EOD 定时平仓: clock.set_time_alert("eod_flat", flat_at+5min+2s) 闹钟驱动,
+         本文件 bar 触发保留作兜底 → 见 _flatten 处 TODO (on_stop 需 cancel_timer)
+  P1-2 □ 隔夜残留仓位防护: 新日重置时 net_position≠0 → 立即市价平掉+告警
+         → 见 on_bar 新日重置处 TODO
+  P2-1 □ 止损单 GTD 当日过期 (双保险防跨日残留) → 见 _place_stop 下单处 TODO
+  P2-2 □ 回归用例补齐: _verify_live_logic.py 加 D 组 (BE 拉保本次数/触发价 vs pandas
+         独立计算) 与 E 组 (模拟时钟到点必平仓、bar 兜底幂等) → 见该文件头 TODO
+  P2-3 □ DRY_RUN 首日人工核对: [bar]/[信号] 的墙钟前缀应只落在 5min 边界后几秒;
+         若落在 bar 中间 = keepUpToDate 中间更新被透传, 推送语义与回测不符, 需回改
+回归纪律: 每完成一项跑 _verify_live_logic.py (A/B/C 全过 + 新增组)。
+
 前置
 ----
   本机 IB Gateway 已登录 paper 账户, API 端口 4002 开放, API 类型选 IB API(非 FIX/CTCI)。
@@ -292,6 +312,9 @@ class OrbLiveStrategy(Strategy):
         flat_at = HALF_DAY_FLAT if str(d) in HALF_DAYS else T_FLAT
 
         if d != self._day:                       # 新交易日: 重置区间与状态
+            # TODO·P1-2: 隔夜残留仓位防护 —— cancel 只撤单不平仓; 若昨日收盘平仓失败
+            #   (bar 缺失/断线), 仓位会带着今天裸奔一整天。此处应加:
+            #   net_position != 0 → 立即市价平掉 + error 级日志告警。
             if self._day is not None:
                 # 清掉昨日残留挂单(例如止损一直没触发、或收盘平仓失败留下的单)
                 self.cancel_all_orders(self.instrument_id)
@@ -301,6 +324,8 @@ class OrbLiveStrategy(Strategy):
                 self.n_signals = self.n_entries = self.n_be_moves = 0
                 self.n_stopped = self.n_be_exits = self.n_eod = 0
             self._day = d
+            # TODO·P1-1: 在此设当日 EOD 平仓闹钟 (clock.set_time_alert,
+            # flat_at + 5min + 2s; 细节见 _flatten 处 TODO)
             self._rng_hi = self._rng_lo = None
             self._entered_today = False
             self._entry_side = None
@@ -462,6 +487,8 @@ class OrbLiveStrategy(Strategy):
         self.slip.note_signal(ref, kind="stop", side=side.name, qty=float(self._filled_qty),
                               signal_px=trig, trigger_px=trig, signal_ts_ns=None,
                               bar_ts_ns=fill_ts_ns)
+        # TODO·P2-1: 加 time_in_force=TimeInForce.GTD + expire_time=当日 15:57(ET),
+        #   收盘前自动过期, 双保险防止损单跨日残留(新日重置撤单是第一道)。
         self._stop_order = self.order_factory.stop_market(
             instrument_id=self.instrument_id, order_side=side,
             quantity=Quantity.from_str(str(self._filled_qty)),
@@ -498,6 +525,12 @@ class OrbLiveStrategy(Strategy):
         self._log(f"[BE] 浮盈达 {self.be_r_multiple:g}R (峰值 {self._peak_r:.2f}R) → "
                   f"止损拉到保本 @ {be_px:.2f} (原 {old_trig:.2f}), 之后持有到收盘")
 
+    # TODO·P1-1: 平仓主路径改为 clock 定时闹钟驱动(数据流断了照常触发), 本方法的 bar 触发保留作兜底:
+    #   新日重置时 set_time_alert("eod_flat", flat_at + 5min + 2s) —— 16:00:02 对齐回测
+    #   「15:55 标签 bar 收口」的 EOD 语义(半日市 12:55:02); 两边都查 net_position, 幂等不重复平。
+    #   ⚠️ 定时器买的是健壮性、不是提前下线: 平仓仍由本进程经 Gateway 发单, 进程死了定时器
+    #   跟着死, 价格不回来时仓位过夜裸奔不可接受 → 进程必须活到 ~16:05 确认平仓完成再停。
+    #   on_stop 里 cancel_timer("eod_flat") 防残留回调; 回归见 _verify_live_logic.py E 组。
     def _flatten(self, bar: Bar):
         pos = int(self.portfolio.net_position(self.instrument_id) or 0)
         if pos == 0:

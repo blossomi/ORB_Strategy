@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """上线前验证 live_ib_demo.py 的 OrbLiveStrategy (用回测引擎跑同一个类)。
 
-四组:
+四组 (D/E 为 TODO·P2-2, 待实现):
   A. 正常手数: 信号数 vs pandas 独立计算; 滑点应≈0; 每笔入场应恰好 1 张止损单;
      统计保本(5R)触发/出场次数 —— 参数推荐新增逻辑
   B. 超大手数(逼出分笔成交): 验证「分笔成交不会重复挂止损单」这条修复真的生效
   C. 半日市: 用 HALF_DAYS 命中当天, 应提前在 12:50 平仓(而不是等到没有的 15:55)
+  D. [TODO] BE 回归: 拉保本次数/BE 触发价与 pandas 独立计算(盘中 high/low 触及
+     entry ± 5R)逐条对齐 —— 现在 A 组只打印不校验, BE 语义改动时没有回归网
+  E. [TODO] 定时平仓回归: 配套 live_ib_demo 的 clock.set_time_alert EOD 闹钟,
+     模拟时钟到点必平仓; bar 兜底路径与闹钟幂等不重复平
 
-用法: ../.venv/bin/python _verify_live_logic.py [A|B|C]
+用法: ../.venv/bin/python _verify_live_logic.py [A|B|C]   # D/E 实现后加参
 """
 import os
 import sys
