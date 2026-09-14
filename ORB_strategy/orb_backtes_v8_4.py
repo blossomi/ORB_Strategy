@@ -94,6 +94,13 @@ T_WIN_END     = dtime(10, 30)          # 入场窗口结束 10:10 (无突破则�
 # ---- 保本 ----
 BE_R_MULTIPLE = 7            # 浮盈达 N R → 拉止损到保本 (一次性, 之后持有到收盘)
 BE_BUFFER_TICKS = 0            # 保本缓冲 (tick): 0 = 止损正好在入场价, 覆盖点差需 >=1
+# BE 判定用的 R 取哪一个 (两处 R 在反推生效时会不同):
+#   True  = 反推**之前**的名义 ATR 止损距离 (7.5%×ATR, tick 取整后)
+#           -> 与 csv 导出的 r_multiple 口径一致; 且与手数取整解耦,
+#              永远锚在 "N × 7.5%ATR 的价格位移" 上, 不会因小手数被放大
+#   False = 反推**之后**实际挂在市场的止损距离
+#           -> 与真实单笔风险同源 (N R 就是 N 倍单笔风险), 但手数越小时 N R 被撑得越远
+BE_USE_NOMINAL_R = True
 
 # ---- 止损 (论文方案) ----
 ATR_PERIOD = 14                # ATR 周期
@@ -339,7 +346,8 @@ class OrbStrategy(Strategy):
             order_side=side,
             quantity=Quantity.from_str(str(qty)),
         )
-        self.pending_entry[order.client_order_id] = actual_dist
+        # 交给成交回调: (实际止损距离, 名义 ATR 止损距离) —— BE 判定按开关选用后者
+        self.pending_entry[order.client_order_id] = (actual_dist, stop_dist)
         self.submit_order(order)
         self.entered_today = True
 
@@ -351,7 +359,8 @@ class OrbStrategy(Strategy):
         if trade["stop_order"] is None or not trade["stop_order"].is_open:
             return
 
-        r = trade["r"]
+        # BE 判定用的 R: 见参数区 BE_USE_NOMINAL_R 的说明
+        r = trade["r_nominal"] if BE_USE_NOMINAL_R else trade["r"]
         entry_px = trade["entry_px"]
         if trade["side"] == OrderSide.BUY:
             if bar.high.as_double() >= entry_px + self.be_r_multiple * r:
@@ -390,13 +399,14 @@ class OrbStrategy(Strategy):
             is_first = cid in self.pending_entry
             if is_first:
                 # 第一笔成交: 初始化持仓状态
-                actual_dist = self.pending_entry.pop(cid)
+                actual_dist, nominal_dist = self.pending_entry.pop(cid)
                 self.n_entries += 1
                 self._entry_filled[cid] = 0
                 self._trade = {
                     "side": side,
                     "qty": 0,
-                    "r": actual_dist,
+                    "r": actual_dist,          # 反推后实际止损距离(挂单用)
+                    "r_nominal": nominal_dist,  # 反推前名义 ATR 止损距离(BE 判定可用)
                     "entry_px": event.last_px.as_double(),
                     "stop_order": None,
                     "stop_moved": False,
