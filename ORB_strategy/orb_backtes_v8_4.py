@@ -68,7 +68,7 @@ from nautilus_trader.trading.strategy import Strategy
 # ---- 数据源 (NQ) ----
 DATA_PATH = "nq_5min_rth.parquet"                  # 回测数据 (RTH 9:30-16:00)
 RANGE_DATA_PATH = "nq_5min_eth.parquet"            # 区间数据源 (盘前 9:00-9:30 用 ETH)
-START_DATE = "2019-01-01"                          # 样本窗口起
+START_DATE = "2020-01-01"                          # 样本窗口起
 # START_DATE = "2016-01-01"                          # 样本窗口起
 END_DATE = "2026-08-30"                            # 样本窗口止
 
@@ -86,13 +86,13 @@ PRICE_PRECISION = 2
 # ---- 区间 & 入场窗口 ----
 ET = zoneinfo.ZoneInfo("America/New_York")
 T_RANGE_START = dtime(9, 00)           # 区间开始 9:00
-T_RANGE_END   = dtime(9, 29)          # 区间结束  9:29
+T_RANGE_END   = dtime(9, 30)          # 区间结束  9:29
 T_WIN_START   = dtime(9, 30)          # 入场窗口开始 9:30，如果填(9, 31)则跳过第一根，从9:35的5min K线算起
-T_WIN_END     = dtime(10, 10)          # 入场窗口结束 10:10 (无突破则放弃)
+T_WIN_END     = dtime(10, 30)          # 入场窗口结束 10:10 (无突破则放弃)
 # 收盘: 自动按当日实际最后一根 5min K 线平仓 (常规 15:55, 节假日半日更早, 避免跨夜)
 
 # ---- 保本 ----
-BE_R_MULTIPLE = 5.0            # 浮盈达 N R → 拉止损到保本 (一次性, 之后持有到收盘)
+BE_R_MULTIPLE = 7            # 浮盈达 N R → 拉止损到保本 (一次性, 之后持有到收盘)
 BE_BUFFER_TICKS = 0            # 保本缓冲 (tick): 0 = 止损正好在入场价, 覆盖点差需 >=1
 
 # ---- 止损 (论文方案) ----
@@ -231,6 +231,7 @@ class OrbStrategy(Strategy):
         self.n_no_trade = 0                   # 当日无突破(收盘在区间内)的天数
         self.n_cant_afford = 0                # 当日有突破但买不起手数的天数
         self.n_capped = 0                     # 被最大手数上限压制(qty被砍)的天数
+        self.n_lot_exact = 0                  # 手数恰好整除(无 floor 损失) → 跳过反推 的天数
         self.n_be_moves = 0                   # 浮盈达 N R → 拉到保本 的次数
         self.n_stopped = 0                    # 初始止损出场次数
         self.n_be_exits = 0                   # 保本止损 出场次数
@@ -315,8 +316,16 @@ class OrbStrategy(Strategy):
             return
 
         # 反推止损 (可选): floor 取整损失了部分风险预算, 按整数手数微调止损距离补回,
-        # 让 qty × actual_dist × mult 精确等于 equity × risk%。夹板限制在 1.5×原止损内(保留 ATR 锚定)。
-        if ADJUST_STOP_TO_RISK and qty < self.max_qty:
+        # 让 qty × actual_dist × mult 尽量贴近 equity × risk%。
+        # 两个跳过条件 (任一满足就保持名义 ATR 止损):
+        #   ① qty 撞上 MAX_QTY: 手数已不是"预算能买到的量", 反推只会得到更窄的止损
+        #   ② 手数恰好整除 (预算 /(D×M) 本身就是整数): 没有 floor 损失, 反推值恒等于名义距离。
+        #      注意 actual_dist 是"入场价→取整后止损价"的距离, 入场价不在 tick 网格上时会
+        #      略偏离 D_nom, tick_round 可能把它向上跳一格 -> 反推意外生效, 故显式拦掉。
+        lot_exact = abs(risk_qty - round(risk_qty)) < 1e-6 * max(1.0, risk_qty)
+        if lot_exact:
+            self.n_lot_exact += 1
+        if ADJUST_STOP_TO_RISK and qty < self.max_qty and not lot_exact:
             target_dist = equity * self.risk_per_trade / (qty * self.multiplier)
             target_dist = min(target_dist, stop_dist * 1.5)
             target_dist = max(TICK, tick_round(target_dist))
@@ -856,6 +865,7 @@ if __name__ == "__main__":
     print(f"===== 当日无突破(收盘在区间内): {strategy.n_no_trade:,} 天 =====")
     print(f"===== 当日有突破但买不起手数: {strategy.n_cant_afford:,} 天 =====")
     print(f"===== 被最大手数上限压制(qty被砍): {strategy.n_capped:,} 天 =====")
+    print(f"===== 手数恰好整除(无 floor 损失, 跳过反推): {strategy.n_lot_exact:,} 天 =====")
     print("===== 账户报告(首/尾) =====")
     print(acct.iloc[[0, -1]].to_string())
     print(f"\n最终权益: ${final_total:,.2f}  "
@@ -881,7 +891,7 @@ if __name__ == "__main__":
             f.write(gen_chart_html(bar_list, trades))
 
         os.makedirs("html_output", exist_ok=True)
-        export_trades_csv(engine, "html_output/v8_4_trades.csv", atr_map)
+        export_trades_csv(engine, f"html_output/v8_4_trades_{STARTING_CAPITAL}.csv", atr_map)
 
         print(f"\n已生成图表:")
         print(f"  {report_path}  ({os.path.getsize(report_path)/1e6:.1f} MB)  ← 统计报告")
