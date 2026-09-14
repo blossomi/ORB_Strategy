@@ -1,0 +1,11 @@
+# 凭据与运行产物 —— 绝不进版本库
+*.pwd
+.ctrader/
+runs/
+*.log
+
+# .NET 编译产物
+bin/
+obj/
+*.algo
+*.cbotset

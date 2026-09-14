@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ORB_v8_4 —— cTrader cBot 工程
+    本地编译校验：dotnet build（引用 cTrader CLI 自带的 cAlgo.API.dll）
+    正式产物 .algo：用 cTrader CLI 编译，见 ../README.md「构建」一节
+      ctrader-cli build <project-path>
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>ORB_v8_4</AssemblyName>
+    <RootNamespace>cAlgo.Robots</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- 参考实现里用到的都不是报错级告警，这里只压掉过时 API 提示 -->
+    <NoWarn>CS0618</NoWarn>
+  </PropertyGroup>
+
+  <!-- cAlgo.API.dll 取自本机 cTrader CLI 安装目录；可用 -p:CAlgoApiDir=... 覆盖 -->
+  <PropertyGroup Condition="'$(CAlgoApiDir)' == ''">
+    <CAlgoApiDir>/opt/homebrew/Cellar/ctrader-cli/5.9.0/libexec/</CAlgoApiDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="ORB_v8_4.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="cAlgo.API">
+      <HintPath>$(CAlgoApiDir)cAlgo.API.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

@@ -16,10 +16,14 @@ _import_staging/
 dsh-session-session-*/
 
 # ---------- 生成物：大 HTML 图不进库，小产物(csv/png)进库 ----------
-ORB_strategy/html_output/*.html
+archive/ORB_strategy/html_output/*.html
 *.log
 
-# ---------- live/ 运行记录 (本地保留的审计底稿, 不进库) ----------
-live/logs/
-live/live_slippage*.csv
-live/_verify_live_*.csv
+# ---------- live 运行记录 (本地保留的审计底稿, 不进库; 2026-09-15 起在 v5.0/ 与 archive/live/) ----------
+v5.0/logs/
+v5.0/live_slippage*.csv
+v5.0/_verify_orig_*.csv
+v5.0/_verify_cand_*.csv
+archive/live/logs/
+archive/live/live_slippage*.csv
+archive/live/_verify_live_*.csv
