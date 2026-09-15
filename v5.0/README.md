@@ -25,13 +25,15 @@
 
 ## 2. 跑法
 
+> 环境安装（uv 全流程、全新机器）见根 [README §1](../README.md)；`data/*.parquet` 不进 git，clone 后拷入 `v5.0/data/` 才能跑回测。
+
 ```bash
 cd v5.0
-../.venv/bin/python test_fsm.py          # ① 11 组单测（秒级）
-../.venv/bin/python orb_backtest.py      # ② 回测（~10s）→ results/v5_trades_25000.csv
-../.venv/bin/python parity_check.py      # ③ 逐笔 vs 归档基线
-../.venv/bin/python verify_live.py A     # ④ live 对比回归（B=分笔+GTD，C=半日市）
-../.venv/bin/python orb_live.py          # ⑤ live 运行（默认 DRY_RUN，先连 IB Gateway）
+../.venv/bin/python test_fsm.py          # 单测 11 组（秒级）
+../.venv/bin/python orb_backtest.py      # 回测 ~10s → results/v5_trades_25000.csv
+../.venv/bin/python parity_check.py      # 逐笔 vs 归档基线
+../.venv/bin/python verify_live.py A     # live 回归（B=分笔+GTD，C=半日市）
+../.venv/bin/python orb_live.py          # 实盘（默认 DRY_RUN，先连 IB Gateway）
 ```
 纪律：改过 `orb_fsm.py` → ①②③④ 全跑；只改适配层 → 至少 ④ + 相关入口。
 改回测参数先重跑归档原版刷新 parity 基线（两边同参数才有可比性）。

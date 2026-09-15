@@ -1,0 +1,13 @@
+# v5.0 运行依赖 — 2026-09-15 与本机 .venv (Python 3.12.14) 核对钉版
+# 安装 (VPS / 任何新机器):
+#   python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+#   或 uv:  uv venv .venv --python 3.12 && uv pip install -p .venv -r requirements.txt
+#
+# 注意: data/*.parquet 不在 git 里 (gitignore), clone 后需另行拷入 v5.0/data/
+#       才能跑回测/验证; 只跑 test_fsm.py 无需任何第三方依赖。
+
+nautilus-trader==1.231.0
+nautilus-ibapi==10.45.1      # IB adapter 依赖 (orb_live / verify_live 需要; 纯回测可省)
+pandas==3.0.5
+numpy==2.5.2
+pyarrow==25.0.1

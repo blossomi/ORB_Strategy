@@ -10,12 +10,55 @@
 | **阶段** | 回测定型 ✅ → **实盘验证期（DRY_RUN）** ← 当前在这里 |
 | **标的** | MNQ（Micro Nasdaq，$2/点），当前合约 MNQZ6（~2026-12-10 换月 H7） |
 | **技术栈** | Python 3.12 + NautilusTrader 1.231 + Interactive Brokers（Gateway/API） |
-| **回测成绩** | 推荐参数 2019 起：年化 75.4% / MDD -27.8% / Sharpe 1.54（口径纪律见 §4） |
-| **实盘状态** | paper 账户，DRY_RUN 待在 v5.0 上重启；真单前门槛见 §6 |
+| **回测成绩** | 推荐参数 2019 起：年化 75.4% / MDD -27.8% / Sharpe 1.54（口径纪律见 §5） |
+| **实盘状态** | paper 账户，DRY_RUN 待在 v5.0 上重启；真单前门槛见 §7 |
 
 ---
 
-## 1. 策略规则（v8.4 语义，五句话讲完）
+## 1. 安装（全新机器，用 uv，从零到跑通）
+
+前提只有一个：**uv**（Rust 写的 Python 包管理器，负责装 Python、建虚拟环境、装依赖，
+macOS / Linux 同一套命令）。
+
+```bash
+# ① 装 uv（二选一）
+curl -LsSf https://astral.sh/uv/install.sh | sh    # 通用脚本（装完重开 shell）
+brew install uv                                     # macOS 有 Homebrew 的话
+
+# ② clone 仓库
+git clone git@github.com:blossomi/ORB_Strategy.git   # 没配 SSH key 就用 HTTPS 地址
+cd ORB_Strategy
+
+# ③ Python 3.12 + 虚拟环境 + 依赖（本机没有 Python 也没关系，uv 会自动下载 3.12）
+uv venv .venv --python 3.12
+uv pip install -p .venv -r v5.0/requirements.txt     # 5 个包 ~200MB，官方 wheel 免编译
+
+# ④ 拷数据（唯一不在 git 里的东西：data/*.parquet 被 gitignore）
+#    从已有机器把 NQ 两件套拷进 v5.0/data/（在本机上就是 cp，跨机器用 scp）
+mkdir -p v5.0/data
+scp 旧机器:~/ORB_Strategy/archive/ORB_strategy/nq_5min_{rth,eth}.parquet v5.0/data/
+
+# ⑤ 冒烟验证：单测（秒级、零数据依赖）→ 回测（全样本 ~10s）
+.venv/bin/python v5.0/test_fsm.py
+cd v5.0 && ../.venv/bin/python orb_backtest.py       # 末尾应打印 1,713 笔 / $656,612
+```
+
+到这里回测链路就通了。**实盘（可选）**另需 IB Gateway（headless 安装，paper 端口 4002，
+~1GB RAM；真单还要求 CME 实时行情订阅——延迟数据收得到但不能用于下单），运行
+`cd v5.0 && ../.venv/bin/python orb_live.py`（默认 DRY_RUN 只记信号不下单），
+日常操作手册见 `archive/live/OPERATIONS.md`。
+
+## 2. 快速运行（日常）
+
+```bash
+cd v5.0
+../.venv/bin/python orb_backtest.py      # 回测 → results/v5_trades_25000.csv
+../.venv/bin/python parity_check.py      # 逐笔 vs 归档基线（1,713 笔必须全同）
+../.venv/bin/python verify_live.py A     # live 逻辑回归（B=分笔+GTD，C=半日市）
+```
+纪律：改过 `orb_fsm.py`（策略核心）→ 三条 + 单测全跑；只改适配层 → 跑 `verify_live.py` + 相关入口。
+
+## 3. 策略规则（v8.4 语义，五句话讲完）
 
 1. **区间**：盘前 9:00–9:30（ETH 数据，6 根 5m K 线，右开写法 `[9:00, 9:30)` 配 `<`）的最高/最低价。
 2. **入场**：9:30–10:10 窗口内逐根 K 线用**收盘价**判突破——收盘 > 区间高做多、< 区间低做空、区间内等下一根；窗口结束无突破当日放弃。
@@ -25,33 +68,20 @@
 
 **edge 本体**：胜率只有 ~15-21%、单笔中位 -1.06R；全部利润来自右尾大赢家（P95 +9.6R / P99 +16.2R），左尾被止损封底（≈ -1.1R）。**任何截断右尾的工具都被实测证伪**（10R 止盈、1R 保本、trailing 均负贡献）；回撤来自连续小亏（最大连败 25-41 笔），不是单笔大亏。
 
-## 2. 仓库布局
+## 4. 仓库布局
 
 | 位置 | 内容 |
 |---|---|
 | [`v5.0/`](v5.0/) | **唯一主线**。`orb_fsm.py` 显式状态机核心（纯 Python，回测/live 共用）+ 两个薄适配层（`orb_backtest.py` / `orb_live.py`）+ 三层验证网（`test_fsm.py` / `verify_live.py` / `parity_check.py`）+ 自持数据 `data/`。详见 [v5.0/README.md](v5.0/README.md) |
 | [`archive/`](archive/) | v8.4 时代全部旧代码：ORB_strategy（v1-v8.5 版本史 + 数据 + parity 基线）、live（旧实盘主线 + OPERATIONS.md 运维手册）、GLM_working（参数搜索框架 + 研究结论 REPORT.md + VWAP-MR 研究）、ctrader（C# 移植）、propfirm（prop 研究）。详见 [archive/README.md](archive/README.md) |
 | [`notebook.md`](notebook.md) | **项目笔记本（结论唯一权威）**：「当前状态」活页 +「持久结论」A-F 区 + append-only 变更日志。AI 托管 |
-| `.venv/` | Python 环境（所有脚本 `../.venv/bin/python` 运行；系统 python 无 pandas） |
+| `.venv/` | Python 环境（uv 管理；重建 = 上文安装步骤 ③） |
 
 **架构要点（为什么有 v5.0）**：旧版回测和 live 各养一份手写状态逻辑，先后踩过同类的坑（回测部分成交漏挂止损 → -11R 假尾部；live `is_open` 误判 → 31 笔挂 62 张止损单）。v5.0 把决策收敛为一个 FSM（`FLAT → PENDING_ENTRY → IN_POSITION → FLAT` + 安全迁移），回测/live 只是适配层——**改一处逻辑两边生效，一套验证网兜底**。
 
-## 3. 快速开始
+## 5. 回测结论（全部数字带口径）
 
-```bash
-cd v5.0
-../.venv/bin/python test_fsm.py          # ① 11 组状态机单测（秒级）
-../.venv/bin/python orb_backtest.py      # ② 全样本回测 ~10s → results/v5_trades_25000.csv
-../.venv/bin/python parity_check.py      # ③ 逐笔 diff 归档基线（1,713 笔必须全同）
-../.venv/bin/python verify_live.py A     # ④ live 逻辑回归（B=分笔成交，C=半日市）
-```
-
-实盘（需要先起 IB Gateway，paper 端口 4002）：`cd v5.0 && ../.venv/bin/python orb_live.py`（默认 DRY_RUN 只记信号不下单；运维手册 `archive/live/OPERATIONS.md`）。
-纪律：改过 `orb_fsm.py` → ①②③④ 全跑；实盘前置链与阶段门控见 §6。
-
-## 4. 回测结论（全部数字带口径）
-
-### 4.1 主结果：推荐参数 7.5%ATR × 5R 保本 × 0.7% 风险（MNQ / $25k / 1 tick 滑点 + $0.5 手续费每边）
+### 5.1 主结果：推荐参数 7.5%ATR × 5R 保本 × 0.7% 风险（MNQ / $25k / 1 tick 滑点 + $0.5 手续费每边）
 
 | 窗口 | 笔数 | 年化 | MDD | Sharpe | 用途 |
 |---|---|---|---|---|---|
@@ -61,9 +91,9 @@ cd v5.0
 
 **稳健性**：walk-forward（5 训 1 测 × 6 窗口）**6/6 段样本外盈利**，固定参数不调参最差年 +16%、单年 MDD ≤ -26%；年度分解 2016 起仅 2017 为负（2018 +82.6% / 2019 +125.2% / 2020 +22.4% / 2021 +47.5% / 2022 +201.9% / 2023 +64.5% / 2024 +65.8% / 2025 +11.7% / 2026YTD +60.1%）。
 
-**⚠️ 口径纪律**：⚠️ 2020 起 / 7R / 窗口至 10:30 是磁盘上的**实验态**（$25k→$656,612，年化 63.4%），不是推荐参数；跳过 2017 属于样本选择而非策略改进。**任何两个数字对比前先核对起点/止损/BE/滑点/本金五个口径**。
+**⚠️ 口径纪律**：2020 起 / 7R / 窗口至 10:30 是磁盘上的**实验态**（$25k→$656,612，年化 63.4%），不是推荐参数；跳过 2017 属于样本选择而非策略改进。**任何两个数字对比前先核对起点/止损/BE/滑点/本金五个口径**。
 
-### 4.2 已验证的关键结论
+### 5.2 已验证的关键结论
 
 - **参数面**：止损 5%-10%×ATR 合适（0.5%-1% 灾难性爆仓——紧止损小于单根噪声）；BE 是弱参数（5R 推荐，1-2R 有害，8R+ ≈ 不拉）；风险 0.3%-1.0% 只放大年化/MDD 不动 Sharpe（1.5% 档 MDD -65% 不可接受）。
 - **已证伪**：10R 止盈、1R 保本、trailing（负收益不降回撤）、15 分钟 K 线、区间后移到开盘后（edge 大幅衰减）、开盘首根计入区间（PF 1.04 灾难）、**VWAP 均值回归旁支**（NQ+ES 三轮 ~2,800 笔全负，终判不开坑）。
@@ -72,11 +102,11 @@ cd v5.0
 - **分布**：E[R] = +0.42，对数正态 ≫ 正态（Shapiro 拒绝），左尾截断 -1.10R，VaR(1%) = -1.02R——Sortino ≫ Sharpe，**降权 Sharpe、看 Sortino/PF**。
 - **反推止损**（`ADJUST_STOP_TO_RISK`）：中位只放宽 +1.75% 却引入两个 R 的口径分裂，可评估关掉（待办）。
 
-### 4.3 硬规则（每条都是踩过的坑，见 `.hermes.md`）
+### 5.3 硬规则（每条都是踩过的坑，见 `.hermes.md`）
 
 1. 回测起点 ≥2016（2010-2015 数据本身稀疏）；2. 任何回测先查「能否买得起 1 手」（否则零交易段污染样本）；3. 突破判定只用收盘价（high/low 触及有双边歧义）；4. 大单分笔成交时止损必须按累计已成交数量挂（v8.4 部分成交 bug 曾制造 -11R 假左尾）；5. 参数结论必须报 walk-forward，不只报全样本最优；6. 不许为好看调低成本假设。
 
-## 5. 实盘系统（v5.0）
+## 6. 实盘系统（v5.0）
 
 **架构**：FSM 核心 + IB 适配层；三层验证网全绿——回测 1,713 笔逐笔 parity 全同（Σpnl 与归档基线分毫不差）、live 与归档原版同引擎双跑 A/B/C 逐笔全同、11 组状态机单测；全程 12.7s→10.0s（数据管道 ~5×）。
 
@@ -93,12 +123,11 @@ cd v5.0
 
 **已知风险（诚实清单）**：① IB paper 成交是模拟的（触价即成、无排队），paper「滑点 ≈0」只是链路下限，**真实滑点必须用小额真单采集**；② 回测 1 tick 滑点假设对末期大仓位（复利后期 150-200 手市价单）明显乐观，是当前数字最大的不真实来源；③ 复利后期杠杆未建模（0.7%+5pt 止损可达 ~29× 名义），待加 min(风险, 保证金) 帽；④ 半日市日历靠人维护（已有 P1-1 闹钟兜底）；⑤ macOS 系统睡眠杀进程 → 必须 `caffeinate -s`，进程须活到 ~16:05 确认平仓。
 
-## 6. 当前阶段与推进门控
+## 7. 当前阶段与推进门控
 
 ```
 [已完成] 回测定型（推荐参数 + WF 6/6）→ 代码 v5.0（parity 全绿 + 全部防护落地）
-[当前]   ① DRY_RUN 5 个交易日（v5.0/orb_live.py，验证信号时点/手数/止损价 + bar 推送节奏
-          —— 旧 TODO·P2-3：[bar] 墙钟前缀只应落在 5min 边界后几秒）
+[当前]   ① DRY_RUN 5 个交易日（v5.0/orb_live.py，验证信号时点/手数/止损价 + bar 推送节奏）
    → ② DRY_RUN=false paper 5 天（真实下单链路：止损/分笔改量/EOD 平仓）
    → ③ MNQ 真单 1 手 × 30 笔（采集真实滑点 → 校准回测 SLIPPAGE_TICKS → 边界参数复测）
    → ④ 校准后放大（0.7% 风险复利）
@@ -106,10 +135,10 @@ cd v5.0
 纪律：DRY_RUN 观察期内不改引擎文件；每完成一项跑 verify_live.py；换月/半日/改码必跑回归。
 ```
 
-## 7. 路线图
+## 8. 路线图
 
 **近期（实盘验证期）**
-- 走完 §6 四阶段门控，产出真实滑点样本并校准回测
+- 走完 §7 四阶段门控，产出真实滑点样本并校准回测
 - 上线即启用失效监控：-45R 硬停机线、41 连亏警报、2 tick 滑点 > 15%×1R 雷达、季度逐笔 diff（分执行损耗 vs edge 衰退）；期望锚 = WF 最差年 +16%，不是全样本
 
 **中期**
@@ -121,7 +150,7 @@ cd v5.0
 - ctrader CFD 通道（`archive/ctrader/`，C# cBot 编译零警告，卡 cTID 凭据；其 2 个待修 P1 可直接抄 v5.0 FSM 的迁移表）
 - prop firm 仅作零本金补充通道（已定论：同手数下 IBKR 自有资金 = prop 的 3.6 倍，规则墙吃掉 ~72% edge）
 
-## 8. 文档索引
+## 9. 文档索引
 
 | 想了解 | 去哪 |
 |---|---|
