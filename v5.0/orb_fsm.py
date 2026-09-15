@@ -45,20 +45,26 @@ HOLD = "IN_POSITION"
 
 # ===========================================================================
 # 参数 (与 v8.4「参数开关区」一一对应, 由适配层注入)
+#   ⚠️ 全部字段**必须显式传入**, 刻意不给默认值: 本文件只定义决策逻辑, 不持有
+#   策略参数的"第三份拷贝"。若给默认值, 新适配层 (新平台/临时脚本) 漏传某字段会
+#   静默拿到一个陈旧值 —— 2026-09-15 就发生过 (回测盘上被改成实验态 7R/10:30
+#   而实盘是 5R/10:10, 两边语义不一致却零报警)。现在漏传 = TypeError。
+#   生产值来源: orb_backtest.py 参数区 / orb_live.py 参数区; 单测用 test_fsm.py
+#   的 TEST_PARAMS。
 # ===========================================================================
 @dataclass(frozen=True)
 class FsmParams:
-    tick: float = 0.25
-    multiplier: float = 2.0            # $/点 (MNQ 2.0)
-    risk_per_trade: float = 0.007
-    atr_stop_fraction: float = 0.075
-    max_qty: int = 200
-    be_r_multiple: float = 7.0
-    be_buffer_ticks: int = 0
-    be_use_nominal_r: bool = True      # BE 判定用名义 ATR 距离 (与 csv r_multiple 口径一致)
-    adjust_stop_to_risk: bool = True   # 反推止损
-    t_win_start: time = time(9, 30)
-    t_win_end: time = time(10, 30)
+    tick: float
+    multiplier: float                  # $/点 (MNQ 2.0)
+    risk_per_trade: float
+    atr_stop_fraction: float
+    max_qty: int
+    be_r_multiple: float
+    be_buffer_ticks: int
+    be_use_nominal_r: bool             # BE 判定用名义 ATR 距离 (与 csv r_multiple 口径一致)
+    adjust_stop_to_risk: bool          # 反推止损
+    t_win_start: time
+    t_win_end: time
 
     def tick_round(self, px: float) -> float:
         """取整到 tick 网格 (与原版 tick_round 完全一致)。"""

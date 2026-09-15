@@ -13,6 +13,19 @@ from orb_fsm import FLAT, HOLD, PENDING, EntryPlan, FsmCommands, FsmEnv, FsmPara
 
 D = date(2026, 9, 15)
 
+# ---------------------------------------------------------------------------
+# 测试自持参数 (orb_fsm.FsmParams 已改为全字段必填, 不再有默认值)
+#   刻意与生产参数解耦: 这些是**重构当时的确切值**, 让断言(7R/10:30 等)保持原样,
+#   不与 orb_backtest::FSM_PARAMS / orb_live 的锁定推荐(5R/10:10)耦合。
+#   要覆盖生产口径, 另写用例并显式传参 —— 不要改这份。
+# ---------------------------------------------------------------------------
+TEST_PARAMS = FsmParams(
+    tick=0.25, multiplier=2.0, risk_per_trade=0.007, atr_stop_fraction=0.075,
+    max_qty=200, be_r_multiple=7.0, be_buffer_ticks=0,
+    be_use_nominal_r=True, adjust_stop_to_risk=True,
+    t_win_start=time(9, 30), t_win_end=time(10, 30),
+)
+
 
 # ---------------------------------------------------------------------------
 # 假件
@@ -76,7 +89,7 @@ class FakeEnv(FsmEnv):
 
 
 def make(params=None, env=None, cmds=None, sync_fill_px=None, audit=True):
-    p = params or FsmParams()
+    p = params or TEST_PARAMS
     e = env or FakeEnv()
     c = cmds or FakeCmds(sync_fill_px=sync_fill_px)
     f = OrbFsmFactory(p, e, c, audit)
