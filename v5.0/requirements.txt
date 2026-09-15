@@ -1,13 +1,22 @@
-# v5.0 运行依赖 — 2026-09-15 与本机 .venv (Python 3.12.14) 核对钉版
+# v5.0 运行依赖 — 2026-09-15 与本机 .venv (Python 3.12.14) 逐包核对钉版
 # 安装 (VPS / 任何新机器):
 #   python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
 #   或 uv:  uv venv .venv --python 3.12 && uv pip install -p .venv -r requirements.txt
 #
 # 注意: data/*.parquet 不在 git 里 (gitignore), clone 后需另行拷入 v5.0/data/
 #       才能跑回测/验证; 只跑 test_fsm.py 无需任何第三方依赖。
+#
+# ⚠️ nautilus-trader 必须带 [ib] extra —— 只有它声明 protobuf / defusedxml
+#    (以及 nautilus-ibapi)。缺了会这样炸:
+#      $ python -c "from ibapi.client import EClient"
+#      ModuleNotFoundError: No module named 'google'
+#    orb_live.py / verify_live.py 必踩。本机 .venv 里一直有 protobuf 是历史手工
+#    安装的巧合, 声明层从来没写 —— 换新机器 (VPS) 就会暴露。
 
-nautilus-trader==1.231.0
-nautilus-ibapi==10.45.1      # IB adapter 依赖 (orb_live / verify_live 需要; 纯回测可省)
+nautilus-trader[ib]==1.231.0   # ib extra = protobuf==5.29.6 + defusedxml + nautilus-ibapi
+nautilus-ibapi==10.45.1        # IB adapter 客户端 (ib extra 已含; 显式列出便于核对版本)
+protobuf==5.29.6               # ibapi 序列化依赖 (ib extra 钉的精确版本)
+defusedxml==0.7.1              # ibapi XML 解析依赖
 pandas==3.0.5
 numpy==2.5.2
 pyarrow==25.0.1
