@@ -49,7 +49,7 @@ DATA_PATH = str(DATA_DIR / "nq_5min_rth.parquet")
 RANGE_DATA_PATH = str(DATA_DIR / "nq_5min_eth.parquet")
 OUT_DIR = Path(__file__).resolve().parent / "results"
 
-START_DATE = "2020-01-01"
+START_DATE = "2019-01-01"
 END_DATE = "2026-08-30"
 
 INSTRUMENT_ID = "NQ.GLBX"
@@ -62,9 +62,9 @@ ET = zoneinfo.ZoneInfo("America/New_York")
 T_RANGE_START = dtime(9, 0)
 T_RANGE_END = dtime(9, 30)
 T_WIN_START = dtime(9, 30)
-T_WIN_END = dtime(10, 30)
+T_WIN_END = dtime(10, 10)
 
-BE_R_MULTIPLE = 7
+BE_R_MULTIPLE = 5
 BE_BUFFER_TICKS = 0
 BE_USE_NOMINAL_R = True
 ATR_PERIOD = 14
