@@ -62,13 +62,13 @@ description: 量化回测/策略研究质量守门清单，沉淀自本项目 20
 
 ## E. 工程与复现
 
-1. 只用 repo 根 `.venv/bin/python`（系统 python3 无 pandas/nautilus；裸 `python` 不存在）。装包 `UV_CACHE_DIR=.uv_cache uv pip install -p .venv <pkg>`。
+1. Python 环境优先用 **pixi**（2026-09-15 起为标准）：`pixi run test|backtest|live|verify|check-deps`，环境在 `.pixi/envs/default/`，跨 mac/Linux 同一份 `pixi.lock`。备选 repo 根 `.venv/bin/python`（系统 python3 无 pandas/nautilus；裸 `python` 不存在）。装包改 `pixi.toml` + `pixi install`（uv 备选 `UV_CACHE_DIR=.uv_cache uv pip install -p .venv <pkg>`），两边版本由 `pixi run check-deps` 强制同版。
 2. **移动代码后必须 grep 相对路径 + 从新位置跑入口验证**——import smoke test 查不出 cwd 相对路径断裂（已踩：_verify_live_logic.py 移动后 parquet 路径断）。
 3. **脚本全参数化**：`--instrument/--start/--win/--target/--tag/--no-save` 模式，默认值 = 基线行为，改参数重跑基线应 bit-identical。暴力网格很便宜（全样本 ≈17s、49 组合 ≈4 分钟），宁大网格不玩启发式。
 4. **新实验放独立自包含文件夹**（脚本 + results/ + README.md，如 `GLM_working/vwap_mr/`）：细节权威 = 该 README，notebook.md 只留一行索引。
 5. **重构/移植必须带三层验证网**：单测 + 逐笔 CSV parity + 双跑 diff。orb_v84s 靠它抓到 3 个自引入 bug + 1 个原版真缺陷（半日市裸奔）——三层网是常设资产，不是一次性脚手架。
 6. **状态逻辑勿在回测/live 各养一份**：同类状态坑已各踩一遍（回测部分成交漏挂止损 → 假左尾；live `is_open` 误判 → 31 笔挂 62 张止损单）。新引擎优先单一 FSM + 薄适配层（orb_v84s 模式）。
-7. 回测主线 `orb_backtes_v8_4.py` 勿动勿改名（被其他脚本按相对路径引用）；parity 基线 CSV 与引擎参数必须同步刷新。
+7. 回测主线 = `v5.0/orb_backtest.py`（旧 `orb_backtes_v8_4.py` 已归档 `archive/ORB_strategy/`，勿改名——parity 基线与旧脚本按相对路径互相引用）；parity 基线 CSV 与引擎参数必须同步刷新。
 
 ## F. 外部平台/移植专项（cTrader、IB 等）
 

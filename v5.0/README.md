@@ -25,7 +25,7 @@
 
 ## 2. 跑法
 
-> 环境安装（uv 全流程、全新机器）见根 [README §1](../README.md)；用 pixi 的一键环境见根 [README §1b](../README.md)（`pixi run test|backtest|verify|check-deps`，跨 mac/Linux 同一份 lockfile）。`data/*.parquet` 不进 git，clone 后拷入 `v5.0/data/` 才能跑回测。
+> 环境安装（pixi 全流程、全新机器）见根 [README §1](../README.md)；不用 pixi 的 uv 备选见 [README §1.3](../README.md)（`pixi run test|backtest|live|verify|check-deps`，跨 mac/Linux 同一份 lockfile）。`data/*.parquet` 不进 git，clone 后拷入 `v5.0/data/` 才能跑回测。
 
 ```bash
 cd v5.0

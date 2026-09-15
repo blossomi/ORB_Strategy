@@ -60,6 +60,7 @@ research = { features = ["research"], solve-group = "default" }
 [tasks]
 test = "python v5.0/test_fsm.py"
 backtest = "python v5.0/orb_backtest.py"
+live = "python v5.0/orb_live.py"
 verify = "python v5.0/verify_live.py A && python v5.0/verify_live.py B && python v5.0/verify_live.py C"
 check-deps = "python check_env_sync.py"
 parity = "python v5.0/parity_check.py"

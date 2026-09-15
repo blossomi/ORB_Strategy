@@ -10,93 +10,116 @@
 | **阶段** | 回测定型 ✅ → **实盘验证期（DRY_RUN）** ← 当前在这里 |
 | **标的** | MNQ（Micro Nasdaq，$2/点），当前合约 MNQZ6（~2026-12-10 换月 H7） |
 | **技术栈** | Python 3.12 + NautilusTrader 1.231 + Interactive Brokers（Gateway/API） |
-| **回测成绩** | 推荐参数 2019 起：年化 75.4% / MDD -27.8% / Sharpe 1.54（口径纪律见 §5） |
+| **回测成绩** | 推荐参数 2019 起（名义-R 口径）：年化 72.5% / MDD -28.3% / Sharpe 1.51（口径纪律见 §5） |
 | **实盘状态** | paper 账户，DRY_RUN 待在 v5.0 上重启；真单前门槛见 §7 |
 
 ---
 
-## 1. 安装（全新机器，用 uv，从零到跑通）
+## 1. 安装（全新机器，用 pixi，从零到跑通）
 
-前提只有一个：**uv**（Rust 写的 Python 包管理器，负责装 Python、建虚拟环境、装依赖，
-macOS / Linux 同一套命令）。
+前提只有一个：**pixi** —— Rust 写的跨平台包管理器，把「Python 本体 + 全部依赖」锁进
+仓库根的 `pixi.lock`，macOS / Linux 同一套命令，**不需要 sudo、不需要 `conda activate`**。
+（不用 pixi 的机器见 §1.3 的 uv 备选路线。）
 
 ```bash
-# ① 装 uv（二选一）
-curl -LsSf https://astral.sh/uv/install.sh | sh    # 通用脚本（装完重开 shell）
-brew install uv                                     # macOS 有 Homebrew 的话
+# ① 装 pixi（一次性，装到 ~/.pixi/bin，不需要 sudo；装完重开 shell）
+curl -fsSL https://pixi.sh/install.sh | bash        # macOS 也可 brew install pixi
+pixi --version                                      # 确认能跑（本仓库实测 0.80.0）
 
 # ② clone 仓库
 git clone git@github.com:blossomi/ORB_Strategy.git   # 没配 SSH key 就用 HTTPS 地址
 cd ORB_Strategy
 
-# ③ Python 3.12 + 虚拟环境 + 依赖（本机没有 Python 也没关系，uv 会自动下载 3.12）
-uv venv .venv --python 3.12
-uv pip install -p .venv -r v5.0/requirements.txt     # 5 个包 ~200MB，官方 wheel 免编译
+# ③ 建环境（按 pixi.lock 复现：Python 3.12 + 全部依赖，本机不用预装 Python）
+pixi install
+#   本机有缓存 ~6s；全新机器下载 ~1-2 分钟。环境落在 .pixi/envs/default/
 
 # ④ 拷数据（唯一不在 git 里的东西：data/*.parquet 被 gitignore）
-#    从已有机器把 NQ 两件套拷进 v5.0/data/（在本机上就是 cp，跨机器用 scp）
+#    从已有机器把 NQ 两件套拷进 v5.0/data/（本机就是 cp，跨机器用 scp）
 mkdir -p v5.0/data
-scp 旧机器:~/ORB_Strategy/archive/ORB_strategy/nq_5min_{rth,eth}.parquet v5.0/data/
+scp 旧机器:~/ORB_Strategy/v5.0/data/nq_5min_{rth,eth}.parquet v5.0/data/
 
 # ⑤ 冒烟验证：单测（秒级、零数据依赖）→ 回测（全样本 ~10s）
-.venv/bin/python v5.0/test_fsm.py
-cd v5.0 && ../.venv/bin/python orb_backtest.py
+pixi run test
+pixi run backtest
 # 数字随 v5.0/orb_backtest.py 顶部参数块走。HEAD 的锁定口径（2019 起 / 5R / 10:10）
 # 应得到：1,951 笔 / $25k→$1,619,830 / 年化 72.5% / MDD -28.3%。对不上先看参数块。
 ```
 
 到这里回测链路就通了。**实盘（可选）**另需 IB Gateway（headless 安装，paper 端口 4002，
 ~1GB RAM；真单还要求 CME 实时行情订阅——延迟数据收得到但不能用于下单），运行
-`cd v5.0 && ../.venv/bin/python orb_live.py`（默认 DRY_RUN 只记信号不下单），
-日常操作手册见 `archive/live/OPERATIONS.md`。
+`pixi run live`（默认 DRY_RUN 只记信号不下单），日常操作手册见 `archive/live/OPERATIONS.md`。
 
-## 1b. 用 pixi 管理环境（可选；多机 / Linux VPS 推荐）
+### 1.1 日常命令（pixi 任务）
 
-仓库根的 `pixi.toml` + `pixi.lock` 把「Python 版本 + 全部依赖」锁成一份**跨平台**环境：
-mac 上解析一次就同时锁定了 Linux（`nautilus_trader-…-manylinux_2_35_x86_64.whl` 已在 lock 里）。
-不需要 sudo、不需要 `conda activate`，cron / systemd 里直接 `pixi run <task>`。
+| 命令 | 干什么 |
+|---|---|
+| `pixi run test` | 单测 11 组（秒级、零数据依赖） |
+| `pixi run backtest` | 回测 → `v5.0/results/v5_trades_25000.csv` |
+| `pixi run verify` | live 验证网 A/B/C（与原版同引擎双跑逐笔比对） |
+| `pixi run live` | 实盘 / 纸面（默认 DRY_RUN；需先起 IB Gateway） |
+| `pixi run check-deps` | 校验 `pixi.toml` ↔ `v5.0/requirements.txt` 无版本漂移 |
+| `pixi run parity <基线.csv> <候选.csv>` | 逐笔 parity（默认基线是 2020/7R/10:30 口径，磁盘参数不同时必须显式给路径） |
+| `pixi install -e research` | 只有要跑 `archive/` 里的画图/统计脚本时才需要（+matplotlib/scipy） |
 
-```bash
-# ① 装 pixi（一次性，装到 ~/.pixi/bin，不需要 sudo）
-curl -fsSL https://pixi.sh/install.sh | bash
+环境本体在 `.pixi/envs/default/bin/python`（已 gitignore；删掉 `pixi install` 就重建）。
+临时执行单条命令而不建环境：`pixi exec python -c "..."`。
 
-# ② 在仓库根建环境（按 pixi.lock 复现；本机已缓存 ~6s，全新机器 1-2 分钟）
-pixi install
+### 1.2 维护约定（防漂移）
 
-# ③ 日常：四个任务覆盖整条验证链
-pixi run test         # 单测（秒级、零数据依赖）
-pixi run backtest     # 回测（需 v5.0/data/*.parquet）
-pixi run verify       # live 验证网 A/B/C
-pixi run check-deps   # 校验 pixi.toml 与 v5.0/requirements.txt 无版本漂移
-
-# ④ 只有要跑 archive/ 里的画图/统计脚本时才需要第二个环境（+matplotlib/scipy）
-pixi install -e research
-
-# 环境本体在 .pixi/envs/default/bin/python（已 gitignore，可随时删了重建）
-```
-
-**维护约定（防漂移）**
-- `pixi.lock` **必须提交**；换机 / CI / cron 用 `pixi install --locked`，不自作主张升级。
+- `pixi.lock` **必须提交**；换机 / CI / cron 用 `pixi install --locked && pixi run --locked <task>`，
+  不自作主张升级。
 - 依赖只有两处声明，改一处必须同步另一处：改完 `pixi.toml` 跑 `pixi run check-deps`，
   它逐包比对 `v5.0/requirements.txt`，不一致直接退出码 1 —— **漂移 = 报错，不靠人记**。
 - 升级依赖是显式动作：`pixi update <包名>` → 重跑 `pixi run test && pixi run backtest && pixi run verify`。
-- `requirements.txt` 保留：不用 pixi 的机器（或临时容器）仍可 `uv pip install -r` 走通。
 
-**Linux VPS 的两条硬约束**
-- 需要 **glibc ≥ 2.35**（Ubuntu 22.04+ / Debian 12+）。`nautilus-trader` 只有
-  `manylinux_2_35_*` wheel，低于这个版本会被放弃 → 退回源码编译 → 失败。`pixi.toml`
-  的 `platforms` 里已显式声明 `glibc = "2.35"`（不声明时 pixi 按默认 `__glibc=2.28` 拒 wheel，
-  这是它首装失败的**唯一**原因，见文件头注释）。
-- IB Gateway 不在 pixi 管辖范围：官方 Linux 安装器（自带 JRE）+ Xvfb/IBC + systemd 自行部署。
+### 1.3 备选：不用 pixi（纯 uv / pip，5 条命令）
+
+`v5.0/requirements.txt` 与 `pixi.toml` 同版钉死（`pixi run check-deps` 保证），所以临时容器或
+装不了 pixi 的机器可以走这条路，两条路互不干扰：
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh      # 或 brew install uv
+uv venv .venv --python 3.12
+uv pip install -p .venv -r v5.0/requirements.txt     # 官方 wheel 免编译，~200MB
+
+.venv/bin/python v5.0/test_fsm.py                    # 等价 pixi run test
+cd v5.0 && ../.venv/bin/python orb_backtest.py       # 等价 pixi run backtest
+```
+
+### 1.4 迁到 Linux VPS 的硬约束
+
+- **glibc ≥ 2.35**（Ubuntu 22.04+ / Debian 12+）。`nautilus-trader` 只发布
+  `manylinux_2_35_*` wheel，低于此版本会被放弃 → 退回源码编译 → 失败。`pixi.toml` 的
+  `platforms` 里已显式声明 `glibc = "2.35"`（不声明时 pixi 按默认 `__glibc=2.28` 拒 wheel，
+  这是它首装失败的**唯一**原因，见 `pixi.toml` 文件头注释）。
 - 数据仍要单独拷：`data/*.parquet` 被 gitignore（见 §1 第④步）。
+- headless / cron / systemd **不需要激活环境**：
+
+  ```ini
+  # /etc/systemd/system/orb-backtest.service
+  [Service]
+  WorkingDirectory=/home/<user>/ORB_Strategy
+  ExecStart=/home/<user>/.pixi/bin/pixi run --locked backtest
+  ```
+
+  或 crontab：`0 9 * * 1-5 cd ~/ORB_Strategy && ~/.pixi/bin/pixi run --locked verify >> /tmp/orb.log 2>&1`
+- IB Gateway 不在 pixi 管辖范围：官方 Linux 安装器（自带 JRE）+ Xvfb/IBC + systemd 自行部署。
 
 ## 2. 快速运行（日常）
 
 ```bash
+# pixi（推荐，见 §1）
+pixi run backtest        # 回测 → v5.0/results/v5_trades_25000.csv
+pixi run verify          # live 验证网 A/B/C
+pixi run test            # 单测
+pixi run parity <基线.csv> <候选.csv>   # 逐笔 parity（默认基线口径不同，需显式给路径）
+
+# 不用 pixi 时等价写法（见 §1.3）
 cd v5.0
-../.venv/bin/python orb_backtest.py      # 回测 → results/v5_trades_25000.csv
-../.venv/bin/python parity_check.py      # 逐笔 vs 归档基线（1,713 笔必须全同）
-../.venv/bin/python verify_live.py A     # live 逻辑回归（B=分笔+GTD，C=半日市）
+../.venv/bin/python orb_backtest.py
+../.venv/bin/python parity_check.py
+../.venv/bin/python verify_live.py A     # B=分笔+GTD，C=半日市
 ```
 纪律：改过 `orb_fsm.py`（策略核心）→ 三条 + 单测全跑；只改适配层 → 跑 `verify_live.py` + 相关入口。
 
@@ -117,7 +140,7 @@ cd v5.0
 | [`v5.0/`](v5.0/) | **唯一主线**。`orb_fsm.py` 显式状态机核心（纯 Python，回测/live 共用）+ 两个薄适配层（`orb_backtest.py` / `orb_live.py`）+ 三层验证网（`test_fsm.py` / `verify_live.py` / `parity_check.py`）+ 自持数据 `data/`。详见 [v5.0/README.md](v5.0/README.md) |
 | [`archive/`](archive/) | v8.4 时代全部旧代码：ORB_strategy（v1-v8.5 版本史 + 数据 + parity 基线）、live（旧实盘主线 + OPERATIONS.md 运维手册）、GLM_working（参数搜索框架 + 研究结论 REPORT.md + VWAP-MR 研究）、ctrader（C# 移植）、propfirm（prop 研究）。详见 [archive/README.md](archive/README.md) |
 | [`notebook.md`](notebook.md) | **项目笔记本（结论唯一权威）**：「当前状态」活页 +「持久结论」A-F 区 + append-only 变更日志。AI 托管 |
-| `.venv/` | Python 环境（uv 管理；重建 = 上文安装步骤 ③） |
+| `.pixi/` / `.venv/` | Python 环境（pixi 主用 / uv 备选；都在 gitignore，重建 = §1 第③步） |
 
 **架构要点（为什么有 v5.0）**：旧版回测和 live 各养一份手写状态逻辑，先后踩过同类的坑（回测部分成交漏挂止损 → -11R 假尾部；live `is_open` 误判 → 31 笔挂 62 张止损单）。v5.0 把决策收敛为一个 FSM（`FLAT → PENDING_ENTRY → IN_POSITION → FLAT` + 安全迁移），回测/live 只是适配层——**改一处逻辑两边生效，一套验证网兜底**。
 
@@ -127,13 +150,19 @@ cd v5.0
 
 | 窗口 | 笔数 | 年化 | MDD | Sharpe | 用途 |
 |---|---|---|---|---|---|
-| **2019 起** | 1,951 | **75.4%** | **-27.8%** | **1.54**（Sortino 6.02，PF 1.38，胜率 15.9%） | 报「当前 regime 可交易性」 |
-| 2018 起 | 2,204 | 71.2% | -28.2% | 1.49 | 对照（9 个年度全正） |
-| **2016 起** | 2,709 | 56.9% | **-45.7%** | 1.30 | 报「全样本真实水平」（2017 唯一亏损年 -10.0%，全样本 MDD 几乎全部来自它） |
+| **2019 起（名义-R，当前代码默认）** | 1,951 | **72.5%** | **-28.3%** | **1.51**（Sortino 5.86，PF 1.38，胜率 15.8%；终值 $1,619,830） | 报「当前 regime 可交易性」 |
+| 2019 起（实际-R，09-14 前的旧口径） | 1,951 | 75.4% | -27.8% | 1.54（Sortino 6.02，PF 1.38，胜率 15.9%；终值 $1,843,138） | 与历史文档/旧报告对齐时才用 |
+| 2018 起 ⚠️旧口径 | 2,204 | 71.2% | -28.2% | 1.49 | 对照（9 个年度全正） |
+| **2016 起** ⚠️旧口径 | 2,709 | 56.9% | **-45.7%** | 1.30 | 报「全样本真实水平」（2017 唯一亏损年 -10.0%，全样本 MDD 几乎全部来自它） |
 
 **稳健性**：walk-forward（5 训 1 测 × 6 窗口）**6/6 段样本外盈利**，固定参数不调参最差年 +16%、单年 MDD ≤ -26%；年度分解 2016 起仅 2017 为负（2018 +82.6% / 2019 +125.2% / 2020 +22.4% / 2021 +47.5% / 2022 +201.9% / 2023 +64.5% / 2024 +65.8% / 2025 +11.7% / 2026YTD +60.1%）。
 
-**⚠️ 口径纪律**：2020 起 / 7R / 窗口至 10:30 是磁盘上的**实验态**（$25k→$656,612，年化 63.4%），不是推荐参数；跳过 2017 属于样本选择而非策略改进。**任何两个数字对比前先核对起点/止损/BE/滑点/本金五个口径**。
+**⚠️ 口径纪律（2026-09-15 更新）**：2019 起那两行是**同参数、只差 BE 的 R 口径**——
+`BE_USE_NOMINAL_R` 取「反推前名义 ATR 距离」（当前默认，与 csv 的 `r_multiple` 同口径、与手数取整解耦）
+还是「反推后实际挂单距离」（09-14 之前）。同 1,951 笔里 15 笔的路径差被复利放大成 **13.8% 的终值差**，
+两套均可用 archive 原版同参重跑精确复现 —— **引用必须带 R 口径**。2018 起 / 2016 起两行来自旧口径
+时代，尚未在名义-R 下重跑，引用时标注。2020 起 / 7R / 窗口至 10:30 是 09-15 前的**实验态磁盘值**
+（$25k→$656,612，年化 63.4%），已回退、仅存档。**任何两个数字对比前先核对起点/止损/BE/滑点/本金五个口径。**
 
 ### 5.2 已验证的关键结论
 
@@ -150,7 +179,7 @@ cd v5.0
 
 ## 6. 实盘系统（v5.0）
 
-**架构**：FSM 核心 + IB 适配层；三层验证网全绿——回测 1,713 笔逐笔 parity 全同（Σpnl 与归档基线分毫不差）、live 与归档原版同引擎双跑 A/B/C 逐笔全同、11 组状态机单测；全程 12.7s→10.0s（数据管道 ~5×）。
+**架构**：FSM 核心 + IB 适配层；三层验证网全绿——回测逐笔 parity 全同（实验态 1,713 笔、锁定口径 1,951 笔，均与「archive 原版同参重跑」的基线分毫不差）、live 与归档原版同引擎双跑 A/B/C 逐笔全同、11 组状态机单测；全程 12.7s→10.0s（数据管道 ~5×）。
 
 **v5.0 补齐的实盘防护**（旧版全部缺失）：
 
