@@ -49,15 +49,21 @@ DATA_PATH = str(DATA_DIR / "nq_5min_rth.parquet")
 RANGE_DATA_PATH = str(DATA_DIR / "nq_5min_eth.parquet")
 OUT_DIR = Path(__file__).resolve().parent / "results"
 
-START_DATE = "2019-01-01"
+START_DATE = "2021-01-01"
 END_DATE = "2026-08-30"
 
+# ==============================================================================
+# 合约配置信息
+# ==============================================================================
 INSTRUMENT_ID = "NQ.GLBX"
 VENUE = "GLBX"
 MULTIPLIER = 2.0
 TICK = 0.25
 PRICE_PRECISION = 2
 
+# ==============================================================================
+#  时间&区间
+# ==============================================================================
 ET = zoneinfo.ZoneInfo("America/New_York")
 T_RANGE_START = dtime(9, 0)
 T_RANGE_END = dtime(9, 30)
@@ -65,8 +71,17 @@ T_WIN_START = dtime(9, 30)
 T_WIN_END = dtime(10, 10)
 
 BE_R_MULTIPLE = 5
-BE_BUFFER_TICKS = 0
+BE_BUFFER_TICKS = 1
+
+# BE 判定用的 R 取哪一个 (两处 R 在反推生效时会不同):
+#   True  = 反推**之前**的名义 ATR 止损距离 (7.5%×ATR, tick 取整后)
+#           -> 与 csv 导出的 r_multiple 口径一致; 且与手数取整解耦,
+#              永远锚在 "N × 7.5%ATR 的价格位移" 上, 不会因小手数被放大
+#   False = 反推**之后**实际挂在市场的止损距离
+#           -> 与真实单笔风险同源 (N R 就是 N 倍单笔风险), 但手数越小时 N R 被撑得越远
 BE_USE_NOMINAL_R = True
+
+
 ATR_PERIOD = 14
 ATR_STOP_FRACTION = 0.075
 ADJUST_STOP_TO_RISK = True
