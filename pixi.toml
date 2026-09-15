@@ -1,0 +1,65 @@
+# ===========================================================================
+# pixi workspace —— ORB_Strategy 的统一环境（回测 / 实盘 / 归档研究脚本）
+# ---------------------------------------------------------------------------
+# 为什么用它: 一台机器一份环境 + 一份跨平台 lockfile（mac ↔ Linux VPS），
+#   不需要 sudo、不需要 conda activate，cron/systemd 里直接 pixi run。
+#
+# 日常命令:
+#   pixi install                 首次/换机: 按 pixi.lock 建环境（已锁版，秒级）
+#   pixi run test                单测（秒级，零数据依赖）
+#   pixi run backtest            回测全样本（~10s；需 v5.0/data/*.parquet）
+#   pixi run verify              live 验证网 A/B/C
+#   pixi run check-deps          校验 pixi.toml 与 v5.0/requirements.txt 无漂移
+#   pixi install -e research     仅在要跑 archive/ 里画图/统计脚本时
+#   pixi run parity <基线.csv> <候选.csv>   逐笔 parity（默认基线是 2020/7R/10:30 口径，
+#                                            与当前锁定口径不同配置 → 必须显式给路径）
+#
+# ⚠️ 下面两件事都不是可选项，少一个就装不上/跑不起来:
+#   1) 平台虚拟包版本必须显式声明。pixi 默认声明 __osx=13.0 / __glibc=2.28，低于
+#      nautilus-trader 1.231.0 的 wheel 要求（macosx_26_0_arm64 / manylinux_2_35_x86_64），
+#      于是它放弃 wheel 退回 sdist → 调 cargo 源码编译 → 失败。声明后正常吃 wheel。
+#      → 推论: Linux VPS 必须 glibc ≥ 2.35（Ubuntu 22.04+ / Debian 12+）。
+#   2) nautilus-trader 必须带 [ib] extra：protobuf/defusedxml 只在 extra 里声明，
+#      缺了 orb_live / verify_live 运行期报 ModuleNotFoundError: No module named 'google'。
+# ===========================================================================
+[workspace]
+name = "orb-strategy"
+version = "5.0.0"
+channels = ["conda-forge"]
+platforms = [
+    { platform = "osx-arm64", macos = "26.0" },   # 本机 (Apple Silicon)
+    { platform = "linux-64", glibc = "2.35" },    # VPS 目标
+]
+
+[dependencies]
+# Python 由 conda-forge 提供并进 lockfile —— 不再需要 .python-version
+python = "3.12.*"
+
+[pypi-dependencies]
+# 与 v5.0/requirements.txt 同源同版；任何一边改动都要同步另一边 (pixi run check-deps 会拦)
+nautilus-trader = { version = "==1.231.0", extras = ["ib"] }
+nautilus-ibapi = "==10.45.1"
+protobuf = "==5.29.6"
+defusedxml = "==0.7.1"
+pandas = "==3.0.5"
+numpy = "==2.5.2"
+pyarrow = "==25.0.1"
+
+# ---- 归档研究脚本专用（v5.0 主线不需要）------------------------------------
+# archive/GLM_working/alpha_beta.py、archive/ORB_strategy/distribution_fit.py、
+# archive/propfirm/prop_plot_5x.py 三个画图/统计脚本用得上。
+# 不进默认环境：pixi install -e research 才装。
+[feature.research.pypi-dependencies]
+matplotlib = "*"
+scipy = "*"
+
+[environments]
+default = { solve-group = "default" }
+research = { features = ["research"], solve-group = "default" }
+
+[tasks]
+test = "python v5.0/test_fsm.py"
+backtest = "python v5.0/orb_backtest.py"
+verify = "python v5.0/verify_live.py A && python v5.0/verify_live.py B && python v5.0/verify_live.py C"
+check-deps = "python check_env_sync.py"
+parity = "python v5.0/parity_check.py"

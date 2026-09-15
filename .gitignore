@@ -2,6 +2,7 @@
 .venv/
 .uv_cache/
 .uv_pkg_cache/
+.pixi/
 __pycache__/
 *.pyc
 .DS_Store

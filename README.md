@@ -40,13 +40,55 @@ scp 旧机器:~/ORB_Strategy/archive/ORB_strategy/nq_5min_{rth,eth}.parquet v5.0
 
 # ⑤ 冒烟验证：单测（秒级、零数据依赖）→ 回测（全样本 ~10s）
 .venv/bin/python v5.0/test_fsm.py
-cd v5.0 && ../.venv/bin/python orb_backtest.py       # 末尾应打印 1,713 笔 / $656,612
+cd v5.0 && ../.venv/bin/python orb_backtest.py
+# 数字随 v5.0/orb_backtest.py 顶部参数块走。HEAD 的锁定口径（2019 起 / 5R / 10:10）
+# 应得到：1,951 笔 / $25k→$1,619,830 / 年化 72.5% / MDD -28.3%。对不上先看参数块。
 ```
 
 到这里回测链路就通了。**实盘（可选）**另需 IB Gateway（headless 安装，paper 端口 4002，
 ~1GB RAM；真单还要求 CME 实时行情订阅——延迟数据收得到但不能用于下单），运行
 `cd v5.0 && ../.venv/bin/python orb_live.py`（默认 DRY_RUN 只记信号不下单），
 日常操作手册见 `archive/live/OPERATIONS.md`。
+
+## 1b. 用 pixi 管理环境（可选；多机 / Linux VPS 推荐）
+
+仓库根的 `pixi.toml` + `pixi.lock` 把「Python 版本 + 全部依赖」锁成一份**跨平台**环境：
+mac 上解析一次就同时锁定了 Linux（`nautilus_trader-…-manylinux_2_35_x86_64.whl` 已在 lock 里）。
+不需要 sudo、不需要 `conda activate`，cron / systemd 里直接 `pixi run <task>`。
+
+```bash
+# ① 装 pixi（一次性，装到 ~/.pixi/bin，不需要 sudo）
+curl -fsSL https://pixi.sh/install.sh | bash
+
+# ② 在仓库根建环境（按 pixi.lock 复现；本机已缓存 ~6s，全新机器 1-2 分钟）
+pixi install
+
+# ③ 日常：四个任务覆盖整条验证链
+pixi run test         # 单测（秒级、零数据依赖）
+pixi run backtest     # 回测（需 v5.0/data/*.parquet）
+pixi run verify       # live 验证网 A/B/C
+pixi run check-deps   # 校验 pixi.toml 与 v5.0/requirements.txt 无版本漂移
+
+# ④ 只有要跑 archive/ 里的画图/统计脚本时才需要第二个环境（+matplotlib/scipy）
+pixi install -e research
+
+# 环境本体在 .pixi/envs/default/bin/python（已 gitignore，可随时删了重建）
+```
+
+**维护约定（防漂移）**
+- `pixi.lock` **必须提交**；换机 / CI / cron 用 `pixi install --locked`，不自作主张升级。
+- 依赖只有两处声明，改一处必须同步另一处：改完 `pixi.toml` 跑 `pixi run check-deps`，
+  它逐包比对 `v5.0/requirements.txt`，不一致直接退出码 1 —— **漂移 = 报错，不靠人记**。
+- 升级依赖是显式动作：`pixi update <包名>` → 重跑 `pixi run test && pixi run backtest && pixi run verify`。
+- `requirements.txt` 保留：不用 pixi 的机器（或临时容器）仍可 `uv pip install -r` 走通。
+
+**Linux VPS 的两条硬约束**
+- 需要 **glibc ≥ 2.35**（Ubuntu 22.04+ / Debian 12+）。`nautilus-trader` 只有
+  `manylinux_2_35_*` wheel，低于这个版本会被放弃 → 退回源码编译 → 失败。`pixi.toml`
+  的 `platforms` 里已显式声明 `glibc = "2.35"`（不声明时 pixi 按默认 `__glibc=2.28` 拒 wheel，
+  这是它首装失败的**唯一**原因，见文件头注释）。
+- IB Gateway 不在 pixi 管辖范围：官方 Linux 安装器（自带 JRE）+ Xvfb/IBC + systemd 自行部署。
+- 数据仍要单独拷：`data/*.parquet` 被 gitignore（见 §1 第④步）。
 
 ## 2. 快速运行（日常）
 

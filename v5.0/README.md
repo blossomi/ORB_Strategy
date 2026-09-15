@@ -25,18 +25,20 @@
 
 ## 2. 跑法
 
-> 环境安装（uv 全流程、全新机器）见根 [README §1](../README.md)；`data/*.parquet` 不进 git，clone 后拷入 `v5.0/data/` 才能跑回测。
+> 环境安装（uv 全流程、全新机器）见根 [README §1](../README.md)；用 pixi 的一键环境见根 [README §1b](../README.md)（`pixi run test|backtest|verify|check-deps`，跨 mac/Linux 同一份 lockfile）。`data/*.parquet` 不进 git，clone 后拷入 `v5.0/data/` 才能跑回测。
 
 ```bash
 cd v5.0
 ../.venv/bin/python test_fsm.py          # 单测 11 组（秒级）
 ../.venv/bin/python orb_backtest.py      # 回测 ~10s → results/v5_trades_25000.csv
-../.venv/bin/python parity_check.py      # 逐笔 vs 归档基线
+../.venv/bin/python parity_check.py      # 逐笔 vs 归档基线（基线是 2020/7R/10:30 口径，
+                                         #  磁盘参数变了必然 FAIL —— 见 §3）
 ../.venv/bin/python verify_live.py A     # live 回归（B=分笔+GTD，C=半日市）
 ../.venv/bin/python orb_live.py          # 实盘（默认 DRY_RUN，先连 IB Gateway）
 ```
 纪律：改过 `orb_fsm.py` → ①②③④ 全跑；只改适配层 → 至少 ④ + 相关入口。
 改回测参数先重跑归档原版刷新 parity 基线（两边同参数才有可比性）。
+**注**：`orb_backtest.py` 顶部参数块是**使用者手动改的活页**（HEAD = 锁定推荐 2019 起 / 5R / 10:10 → 1,951 笔 / 年化 72.5% / MDD -28.3%），跑出来的数字随它走 —— 引用前先确认参数块。
 
 ## 3. 验证结果（2026-09-15，搬迁后全链重跑全绿）
 
@@ -46,6 +48,12 @@ cd v5.0
 ```
 计数器全同（BE 234 / 初始止损 1,385 / 保本止损 35 / 收盘 293 / 整除跳过 2）；
 新防护触发 = 0（干净数据断言）。
+
+> ⚠️ 上面这段是**当时实验态参数**（2020/7R/10:30）的记录。2026-09-15 磁盘参数已回退到锁定推荐
+> （2019/5R/10:10），并在该口径下重跑了同一套逐笔 parity：**1,951 笔逐字段全同，Σpnl 1,594,830.00**。
+> 但默认基线 `archive/…/v8_4_trades_25000.csv` 仍是 2020/7R/10:30 口径的产物 —— 所以磁盘参数
+> 不是那一套时，`parity_check.py` 直接跑**必然 FAIL**（配置不同，不是回归）。要比对就用同参数重跑
+> 归档原版生成新基线（`pixi run parity <基线> <候选>` 可显式传路径）。
 
 **live vs 原版（verify_live.py 同引擎双跑）**：
 - A 常规窗口 2020Q1：64 笔逐笔全同；BE/出场分类一致（= 旧 TODO·P2-2 的 D 组）；止损单 1:1；
