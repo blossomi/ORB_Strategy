@@ -21,6 +21,8 @@ archive/ORB_strategy/html_output/*.html
 *.log
 
 # ---------- live 运行记录 (本地保留的审计底稿, 不进库; 2026-09-15 起在 v5.0/ 与 archive/live/) ----------
+# 防御: 仓库根的 live_slippage*.csv 只可能来自旧版 cwd 相对路径 bug 的残留
+/live_slippage*.csv
 v5.0/logs/
 v5.0/live_slippage*.csv
 v5.0/_verify_orig_*.csv
