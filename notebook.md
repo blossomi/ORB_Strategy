@@ -169,7 +169,7 @@
 ### E. 工作区与用户决定
 
 - 目录（**2026-09-15 重组后**）：`v5.0/`=唯一主线（FSM 架构：orb_fsm.py 核心 + 回测/live 适配层 + data/ 自持 NQ 两件套）｜`archive/`=旧世界全量归档（ORB_strategy / live / GLM_working / ctrader / propfirm 同层搬入，**相对几何保留**，旧脚本 `../ORB_strategy` 类引用全部仍解析；内含 33 项 v1-v8.5 版本史与 html_output 逐笔基线）｜`notebook.md`=本文件
-- 工作区（**2026-09-17 用户改名**）：本仓库本地文件夹 `Deepseek_Harness` → **`orb-stratrgy`**（GitHub 远仓名未变）；同级 `orb-monitor/` 的默认数据根已同步（`../orb-stratrgy/v5.0`）。orb-monitor 前端工具链同日 npm→deno（见其仓库 README/tech-stack）
+- 工作区（**2026-09-17 用户改名**）：本仓库本地文件夹 `Deepseek_Harness` → **`orb-strategy`**（GitHub 远仓名未变）；同级 `orb-monitor/` 的默认数据根已同步（`../orb-strategy/v5.0`）。orb-monitor 前端工具链同日 npm→deno（见其仓库 README/tech-stack）
 - 弃用 build_TVchart.py（回测+图表+策略描述已整合进单脚本）
 - **移动代码后必须 grep 相对路径 + 从新位置跑入口验证**（import smoke test 查不出 cwd 相对路径断裂）——2026-09-15 重组时全链重跑验证过
 - 技术路线（用户决定）：IB 期货实盘 → NautilusTrader；cTrader CFD → C# cBot；实盘验证标的 **MNQ**（2026-09-12 起，因 $25k 资金颗粒度从 NQ 切换；更早笔记写「实盘验证 NQ」已过期）
@@ -256,4 +256,4 @@
 - 2026-09-16：**NDX ATR 数据层落地（`v5.0/atr_source.py` + orb_live 接线，同日研判转实现）**：live 撤掉 IB 日线 ATR 请求 → 启动/换日从 `data/ndx_daily.parquet` 重算；收盘 17:10 ET 定时更新（失败 60min 重试 ≤2 次后升级 `[ATR告警]` + macOS 桌面通知）；三源 Yahoo/Nasdaq/Stooq 补缺+交叉校验（2% 门禁、表优先 append-only，**禁混源**）；分层降级 = 陈旧 ≤5 日历日照常交易+告警 / 缺失或超限 → `atr=None` 当日不开仓。表递推与独立 pandas 逐位一致（Δ=0）；新增 `test_atr_source.py` 6 组（递推/新鲜度/append-only/全源失败/引擎 glue 表 ATR 驱动真实成交/ladder），已入 `pixi run test`；test_fsm 11 组 + verify_live A/B/C 回归全绿。运行产物不进库：`ndx_daily.parquet`（*.parquet 已 ignore）+ `atr_status.json`（已加 v5.0/.gitignore）；新机器 bootstrap = `python atr_source.py`（Yahoo 自动 20y 全量）。
 - 2026-09-17：**名义杠杆帽敏感性实验完成**——FSM 新增 `leverage_cap`（默认 None 零行为变化：回测参照值逐字复现 + verify A/B/C 全绿 + 单测 12 组）。无帽实现杠杆 max 13.1×/P95 10×；帽=收益↔回撤交换器（Sharpe 恒 ~1.5）；放大期建议 8-10×。全表与结论 → 持久结论 A「名义杠杆帽」。
 - 2026-09-17：**工程清理**——SLIP_CSV 锚定脚本目录（修 `pixi run live` 落盘到仓库根、orb-monitor 看不到滑点的 bug）；删全部 `_probe_*.py`/`_verify_*.csv`/回放产物（v5.0 与 monitor 库均已回干净空态）；VWAP/ 研究文件夹首次入库。
-- 2026-09-17：**工作区改名** `Deepseek_Harness` → `orb-stratrgy`（orb-monitor 默认数据根同步）；orb-monitor 前端工具链 npm→deno 2（deno task dev/build 全链实测通过）。
+- 2026-09-17：**工作区改名** `Deepseek_Harness` → `orb-strategy`（orb-monitor 默认数据根同步）；orb-monitor 前端工具链 npm→deno 2（deno task dev/build 全链实测通过）。
