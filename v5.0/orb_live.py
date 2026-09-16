@@ -90,7 +90,9 @@ T_FLAT = time(15, 55)
 HALF_DAY_FLAT = time(12, 50)
 HALF_DAYS = {"2026-11-27", "2026-12-24"}
 
-SLIP_CSV = "live_slippage.csv"
+# 锚定脚本目录 (与 LOG_DIR 同法): 之前是 cwd 相对路径, `pixi run live` 从仓库根启动时
+# CSV 会写到仓库根, 而 orb-monitor 只读 v5.0/ 下的产物 —— 两边从此恒一致。
+SLIP_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_slippage.csv")
 SLIP_STALE_MS = 2000
 
 NQ_CONTRACT = IBContract(
