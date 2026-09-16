@@ -13,7 +13,7 @@
 | `orb_live.py` | live 主线：FSM 适配层 + IB 接入 + 滑点记录；**P1-1/P1-2/P2-1 已实现** + 三个原版没有的防护 |
 | `atr_source.py` | **live ATR 数据层（2026-09-16 起）**：NDX 指数日线 → 磁盘表 `data/ndx_daily.parquet`（多源补缺+交叉校验，禁混源）；Wilder 14日ATR 递推 + 假日语义 + 陈旧分层降级。live 收盘后 17:10 ET 定时更新、失败重试+桌面告警；启动/换日从表重算（**不再向 IB 请求日线**）。可独立跑：`python atr_source.py`（`--full` bootstrap / `--atr` / `--status`） |
 | `slippage_tracker.py` | 滑点记录（自持副本，源 = archive/live/） |
-| `test_fsm.py` | 11 组纯 FSM 单元测试（秒级，不需要引擎） |
+| `test_fsm.py` | 12 组纯 FSM 单元测试（秒级，不需要引擎） |
 | `test_atr_source.py` | ATR 数据层测试：递推公式对账 / 新鲜度 / 合并 append-only / 全源失败 / 引擎内 glue（表 ATR 驱动真实成交 + 重试 ladder） |
 | `verify_live.py` | 引擎内回归 A/B/C：v5.0 live vs 原版（archive/live）**同数据双跑逐笔 diff** |
 | `parity_check.py` | 回测逐笔 CSV 裁判：v5.0 输出 vs 归档原版基线（archive/ORB_strategy/html_output/v8_4_trades_25000.csv） |
@@ -31,7 +31,7 @@
 
 ```bash
 cd v5.0
-../.venv/bin/python test_fsm.py          # 单测 11 组（秒级）
+../.venv/bin/python test_fsm.py          # 单测 12 组（秒级）
 ../.venv/bin/python orb_backtest.py      # 回测 ~10s → results/v5_trades_25000.csv
 ../.venv/bin/python parity_check.py      # 逐笔 vs 归档基线（基线是 2020/7R/10:30 口径，
                                          #  磁盘参数变了必然 FAIL —— 见 §3）
@@ -41,6 +41,7 @@ cd v5.0
 纪律：改过 `orb_fsm.py` → ①②③④ 全跑；只改适配层 → 至少 ④ + 相关入口。
 改回测参数先重跑归档原版刷新 parity 基线（两边同参数才有可比性）。
 **注**：`orb_backtest.py` 顶部参数块是**使用者手动改的活页**，跑出来的数字随它走 —— 引用前先确认参数块。当前 HEAD = 2021 起 / 5R / 10:10 / 7.5%ATR / **BE 缓冲 1 tick** → 1,444 笔 / 年化 73.3% / MDD -27.9%；锁定推荐口径（2019 起 / 缓冲 0）→ 1,951 笔 / 年化 72.5% / MDD -28.3%。两者只差起点与 BE 缓冲。
+`LEVERAGE_CAP`（默认 None）：名义杠杆帽 `qty×入场价×$2 ≤ cap×权益`，只压手数、帽生效时跳过反推止损；敏感性结论见 notebook 持久结论 A「名义杠杆帽」（无帽实现杠杆 max 13.1×，帽是收益↔回撤交换器，Sharpe 不动）。
 
 ## 3. 验证结果（2026-09-15，搬迁后全链重跑全绿）
 

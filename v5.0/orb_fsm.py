@@ -59,6 +59,7 @@ class FsmParams:
     risk_per_trade: float
     atr_stop_fraction: float
     max_qty: int
+    leverage_cap: float | None        # 名义杠杆帽: qty×入场价×乘数 ≤ cap×权益; None=不设
     be_r_multiple: float
     be_buffer_ticks: int
     be_use_nominal_r: bool             # BE 判定用名义 ATR 距离 (与 csv r_multiple 口径一致)
@@ -183,6 +184,7 @@ class OrbFsm:
         self.n_cant_afford = 0
         self.n_capped = 0
         self.n_lot_exact = 0
+        self.n_lev_capped = 0
         # 新防护路径的计数 (干净数据下恒为 0 —— parity 断言用)
         self.n_overnight_flattens = 0
         self.n_stop_replaces = 0
@@ -308,7 +310,17 @@ class OrbFsm:
         risk_qty = equity * p.risk_per_trade / (actual_dist * p.multiplier)
         if risk_qty > p.max_qty:
             self.n_capped += 1
-        qty = int(floor(min(risk_qty, p.max_qty)))
+        # 名义杠杆帽 (README 已知风险③: 复利后期 0.7% 风险 + 宽止损可达 ~29× 名义)。
+        # 只压手数, 不改其他定价; 帽子生效时**跳过反推止损** —— 反推的前提是
+        # "风险预算因 floor 没花完", 而被杠杆帽压掉的手数不是 floor 损失, 反推只会
+        # 把止损无故放宽 (风险预算并没有多出来)。
+        lev_qty = float("inf")
+        if p.leverage_cap is not None:
+            lev_qty = p.leverage_cap * equity / (entry_px * p.multiplier)
+        lev_binding = lev_qty < min(risk_qty, p.max_qty)
+        if lev_binding:
+            self.n_lev_capped += 1
+        qty = int(floor(min(risk_qty, p.max_qty, lev_qty)))
         if qty < 1:
             # 原版: 买不起 1 手 → cant_afford, 不进反推分支 (调用方置标记)
             return EntryPlan(qty=0, stop_price=stop_price, actual_dist=actual_dist,
@@ -319,7 +331,7 @@ class OrbFsm:
         if lot_exact:
             self.n_lot_exact += 1
 
-        if p.adjust_stop_to_risk and qty < p.max_qty and not lot_exact:
+        if p.adjust_stop_to_risk and qty < p.max_qty and not lot_exact and not lev_binding:
             target_dist = equity * p.risk_per_trade / (qty * p.multiplier)
             target_dist = min(target_dist, stop_dist * 1.5)
             target_dist = max(p.tick, p.tick_round(target_dist))

@@ -21,7 +21,7 @@ D = date(2026, 9, 15)
 # ---------------------------------------------------------------------------
 TEST_PARAMS = FsmParams(
     tick=0.25, multiplier=2.0, risk_per_trade=0.007, atr_stop_fraction=0.075,
-    max_qty=200, be_r_multiple=7.0, be_buffer_ticks=0,
+    max_qty=200, leverage_cap=None, be_r_multiple=7.0, be_buffer_ticks=0,
     be_use_nominal_r=True, adjust_stop_to_risk=True,
     t_win_start=time(9, 30), t_win_end=time(10, 30),
 )
@@ -149,6 +149,33 @@ def test_sizing_math():
     # (capped 情形不反推, actual_dist 保持 7.5 —— 对齐原版条件 qty < max_qty)
     assert plan5.actual_dist == 7.5
     print("  sizing math OK")
+
+
+def test_leverage_cap():
+    """名义杠杆帽: 只压手数; 帽子生效时跳过反推止损 (dist 保持名义值), 也能压到买不起。"""
+    base = dict(tick=0.25, multiplier=2.0, risk_per_trade=0.007,
+                atr_stop_fraction=0.075, max_qty=200, be_r_multiple=7.0,
+                be_buffer_ticks=0, be_use_nominal_r=True,
+                adjust_stop_to_risk=True,
+                t_win_start=time(9, 30), t_win_end=time(10, 30))
+    # 现实量级: NQ 26000 点, 权益 $25k, ATR 100 → 名义止损 7.5pt
+    #   风险手数 = 25000×0.7%/(7.5×$2) = 11.67; 4x 帽 → 4×25000/(26000×2) = 1.92 手
+    f, _ = make(params=FsmParams(leverage_cap=4.0, **base))
+    p1 = f.plan_entry("BUY", 26000.0, 100.0, 25_000.0)
+    assert p1.qty == 1 and p1.actual_dist == 7.5 and f.n_lev_capped == 1
+
+    # 帽宽松 (50x 不约束) ≡ 无帽: qty 11 + 反推到 8.0, 两者逐项相等
+    f2, _ = make(params=FsmParams(leverage_cap=50.0, **base))
+    f3, _ = make(params=FsmParams(leverage_cap=None, **base))
+    p2 = f2.plan_entry("BUY", 26000.0, 100.0, 25_000.0)
+    p3 = f3.plan_entry("BUY", 26000.0, 100.0, 25_000.0)
+    assert p2.qty == p3.qty == 11 and p2.actual_dist == p3.actual_dist == 8.0
+    assert f2.n_lev_capped == f3.n_lev_capped == 0
+
+    # 帽极紧 (1x): 1 手名义 $52k > $25k → 买不起
+    f4, _ = make(params=FsmParams(leverage_cap=1.0, **base))
+    assert f4.plan_entry("BUY", 26000.0, 100.0, 25_000.0).qty == 0
+    print("  leverage cap OK")
 
 
 def test_signal_to_position_reentrant():

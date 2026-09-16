@@ -89,6 +89,8 @@ ADJUST_STOP_TO_RISK = True
 STARTING_CAPITAL = 25000
 RISK_PER_TRADE = 0.007
 MAX_QTY = 200
+LEVERAGE_CAP = None                 # 名义杠杆帽: qty×入场价×$2 ≤ cap×权益; None=不设
+                                    # (敏感性结论见 notebook 持久结论 A「名义杠杆帽」)
 
 COMMISSION_PER_CONTRACT = 0.5
 SLIPPAGE_TICKS = 1
@@ -96,6 +98,7 @@ SLIPPAGE_TICKS = 1
 FSM_PARAMS = FsmParams(
     tick=TICK, multiplier=MULTIPLIER, risk_per_trade=RISK_PER_TRADE,
     atr_stop_fraction=ATR_STOP_FRACTION, max_qty=MAX_QTY,
+    leverage_cap=LEVERAGE_CAP,
     be_r_multiple=BE_R_MULTIPLE, be_buffer_ticks=BE_BUFFER_TICKS,
     be_use_nominal_r=BE_USE_NOMINAL_R, adjust_stop_to_risk=ADJUST_STOP_TO_RISK,
     t_win_start=T_WIN_START, t_win_end=T_WIN_END,
@@ -401,7 +404,8 @@ def print_stats(engine, strategy, sample_df):
     print(f"===== 浮盈达 {BE_R_MULTIPLE}R → 拉保本: {f.n_be_moves:,} 次 =====")
     print(f"===== 出场分布: 初始止损 {f.n_stopped:,}  |  保本止损 {f.n_be_exits:,}  |  收盘平仓 {f.n_eod:,} =====")
     print(f"===== 当日无突破: {f.n_no_trade:,} 天 | 买不起: {f.n_cant_afford:,} 天 "
-          f"| 压顶: {f.n_capped:,} 天 | 整除跳过: {f.n_lot_exact:,} 天 =====")
+          f"| 压顶: {f.n_capped:,} 天 | 杠杆帽: {f.n_lev_capped:,} 天 "
+          f"| 整除跳过: {f.n_lot_exact:,} 天 =====")
     guards = (f.n_overnight_flattens + f.n_stop_replaces + f.n_timer_flattens
               + f.n_late_entry_flattens)
     print(f"===== 新防护触发次数 (干净数据必须=0): {guards} =====")

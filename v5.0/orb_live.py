@@ -190,6 +190,8 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
                       risk_per_trade=self.risk_per_trade,
                       atr_stop_fraction=self.atr_stop_fraction,
                       max_qty=self.max_qty,
+                      leverage_cap=None,   # 实盘暂不设: 小资金下 MAX_QTY=50 已限名义;
+                                           # 待 notebook 杠杆帽结论定档后回填
                       be_r_multiple=self.be_r_multiple,
                       be_buffer_ticks=self.be_buffer_ticks,
                       be_use_nominal_r=True, adjust_stop_to_risk=False,
