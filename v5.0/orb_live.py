@@ -59,41 +59,45 @@ from orb_fsm import HOLD, FsmCommands, FsmEnv, FsmParams, OrbFsm  # noqa: E402
 # ===========================================================================
 # ★ 配置区 —— 与 live/live_ib_demo.py 保持一致 (parity 的前提)
 # ===========================================================================
-IB_HOST = "127.0.0.1"
-IB_PORT = 4002
-ACCOUNT_ID = "DUQ715008"
-CLIENT_ID = 1
+IB_HOST = "127.0.0.1"      # IB Gateway 与策略同机 (headless 常驻, ~1GB RAM)
+IB_PORT = 4002             # Gateway **paper** 端口 (live=4001; TWS 才是 7497/7496, 易混)
+ACCOUNT_ID = "DUQ715008"   # paper 账户 (真单换实盘账户号 + 真单门槛见 README §7)
+CLIENT_ID = 1              # IB API 会话标识: 同一 Gateway 上每个 API 连接须唯一
 
-SYMBOL = "MNQ"
-CONTRACT_MONTH = "202612"
-LOCAL_SYMBOL = "Z6"
-TICK = 0.25
-MULTIPLIER = 2.0 if SYMBOL == "MNQ" else 20.0
+SYMBOL = "MNQ"             # Micro Nasdaq 期货 (NQ 的 1/10): 解决 $25k 买得起 1 手的颗粒度
+CONTRACT_MONTH = "202612"  # 合约月 2026-12 (季月循环 H/M/U/Z, 到期=第三个周五)
+LOCAL_SYMBOL = "Z6"        # IB 本地代码 → MNQZ6; 下次换月 ~2026-12-10 滚入 H7 (2027-03)
+TICK = 0.25                # 1 tick = 0.25 点 = $0.50/手
+MULTIPLIER = 2.0 if SYMBOL == "MNQ" else 20.0   # 每点价值: MNQ $2 / NQ $20
 
-DRY_RUN = True
+DRY_RUN = True             # True = 只记信号/滑点占位, 不向 IB 发单; 置 False 前必须
+                           # CME 实时订阅到位 (paper 与 live 账户共享订阅)
 
-RISK_PER_TRADE = 0.007
-ATR_STOP_FRACTION = 0.075
-BE_R_MULTIPLE = 5.0
-BE_BUFFER_TICKS = 0
-MAX_QTY = 50
+RISK_PER_TRADE = 0.007     # 每笔风险 = 权益×0.7% → 手数 = floor(权益×0.7%/(止损距离×$2)), 复利
+ATR_STOP_FRACTION = 0.075  # 止损距离 = 7.5% × 前一日 14 日 ATR (点); ATR 来自 NDX 外源表
+BE_R_MULTIPLE = 5.0        # 浮盈达 5R → 止损拉到保本; 无止盈无 trailing, 持有到收盘
+BE_BUFFER_TICKS = 0        # 保本价垫 0 tick (= 锁定推荐口径; 回测当前活页是 1)
+MAX_QTY = 50               # 实盘安全帽, 比回测的 200 紧: 防异常权益/异常小止损时手数爆炸
 ATR_OVERRIDE_PTS = None              # 人工兜底: 表不可用时手动钉死 ATR (点)
 
-MARKET_DATA_TYPE = MarketDataTypeEnum.REALTIME
+MARKET_DATA_TYPE = MarketDataTypeEnum.REALTIME   # 必须有 CME 实时订阅: 延迟行情收得到、
+                                                 # 不报 2188, 但不能下单 (15min 延迟对
+                                                 # 9:30-10:10 入场窗致命; 延迟数据只能纸面验证)
 
-T_RANGE_START = time(9, 0)
-T_RANGE_END = time(9, 29)
-T_WIN_START = time(9, 30)
-T_WIN_END = time(10, 10)
-T_FLAT = time(15, 55)
+T_RANGE_START = time(9, 0)     # 盘前区间窗 [9:00, 9:30): 6 根 5m ETH bar 的高/低
+T_RANGE_END = time(9, 29)      # ⚠️ 刻意 9:29 配 <: 右端吞了 9:30 开盘首根 = 灾难 (PF 1.04)
+T_WIN_START = time(9, 30)      # 入场窗 [9:30, 10:10): 逐根**收盘价**判突破 (触及判定有
+T_WIN_END = time(10, 10)       #  双边歧义); 窗毕无突破 → 当日放弃
+T_FLAT = time(15, 55)          # EOD 平仓的 bar 标签时刻 (标签 15:55 的 close = 墙钟 16:00 价)
 
-HALF_DAY_FLAT = time(12, 50)
-HALF_DAYS = {"2026-11-27", "2026-12-24"}
+HALF_DAY_FLAT = time(12, 50)               # 半日市 12:50 提前平仓
+HALF_DAYS = {"2026-11-27", "2026-12-24"}   # 半日市日历人工维护 (漏了由 P1-1 闹钟兜底)
 
 # 锚定脚本目录 (与 LOG_DIR 同法): 之前是 cwd 相对路径, `pixi run live` 从仓库根启动时
 # CSV 会写到仓库根, 而 orb-monitor 只读 v5.0/ 下的产物 —— 两边从此恒一致。
 SLIP_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_slippage.csv")
-SLIP_STALE_MS = 2000
+SLIP_STALE_MS = 2000       # 信号→成交超 2s 的滑点样本标 stale (行情延迟/链路卡) ——
+                           # 不进滑点统计 (orb-monitor 的汇总页同样剔除)
 
 NQ_CONTRACT = IBContract(
     symbol=SYMBOL, secType="FUT", exchange="CME", currency="USD",
@@ -104,9 +108,11 @@ BAR_TYPE_STR = f"{INSTRUMENT_ID}-5-MINUTE-LAST-EXTERNAL"
 
 ET = ZoneInfo("America/New_York")
 
-EOD_TIMER_NAME = "eod_flat"          # P1-1
-EOD_TIMER_PAD = timedelta(minutes=5, seconds=2)   # flat_at + 5min + 2s
-STOP_GTD_PAD = timedelta(minutes=2)              # P2-1: 止损 flat_at+2min 过期
+EOD_TIMER_NAME = "eod_flat"          # P1-1 EOD 闹钟: bar 流断了 (断线/停推) 也能按时平仓
+EOD_TIMER_PAD = timedelta(minutes=5, seconds=2)   # 触发在 flat_at+5min+2s: 给最后一根 bar
+                                                 # 留足先到时间 (正常日 bar 路径先平, 闹钟只兜底)
+STOP_GTD_PAD = timedelta(minutes=2)              # P2-1: 止损单 GTD 到期 = flat_at+2min,
+                                                 # 防平仓失败后止损单跨日残留
 
 ATR_UPDATE_TIMER = "atr_update"
 ATR_UPDATE_AT = time(17, 10)         # 指数 16:00 收盘 → 留出发布时间 (研判: 盘后更新为主)
@@ -379,6 +385,8 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
         self.slip.note_signal(ref, kind="stop", side=exit_side, qty=float(qty),
                               signal_px=trigger, trigger_px=trigger,
                               signal_ts_ns=None, bar_ts_ns=self.clock.timestamp_ns())
+        # reduce_only = 止损单只能减仓 (防极端下反向开仓); GTD 到期 = 当日 flat+2min
+        # (P2-1: 若 EOD 平仓失败, 这张止损单也活不过当日, 与 P1-1 闹钟构成双保险)
         sl = self.order_factory.stop_market(
             instrument_id=self.instrument_id, order_side=OrderSide[exit_side],
             quantity=Quantity(qty, 0),
@@ -404,6 +412,8 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
         self.cancel_all_orders(self.instrument_id)
 
     def flatten_position(self, reason: str, ref: str) -> None:
+        # 撤光在场单再市价平: 在场止损单不平掉的话, 市价平仓后它还挂着,
+        # 会把已清零的仓位反向"开"回来 (旧 live 31 笔挂 62 张止损单事故的根源之一)
         pos = self._net_pos()
         if pos == 0:
             return
@@ -485,6 +495,10 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
 
     # ---------------- 成交回报 → 滑点落盘 + FSM ----------------
     def on_order_filled(self, event):
+        # 每张单提交时在 _order_role 登记 (角色, 滑点ref); 成交按角色路由:
+        #   entry → 记滑点 + FSM (分笔成交会进多次, FSM 内部只认首笔为入场)
+        #   stop  → 记滑点(锚触发价) + FSM (部分成交只减仓, 全成才算出场)
+        #   eod   → 只记滑点 (FSM 在 _close_day 已自行清状态)
         cid = str(event.client_order_id)
         role, ref = self._order_role.get(cid, (None, None))
         px = event.last_px.as_double()
@@ -528,6 +542,8 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
         self._route_stop_death(event, "过期")
 
     def _route_stop_death(self, event, why: str):
+        # 止损单「死亡」三事件 (被撤/被拒/过期) 汇入这里 → 转给 FSM 立即重挂。
+        # 只认当前止损单的 cid: 自己 EOD 撤单的回音 (cid 已清) 不会误触发重挂
         cid = str(event.client_order_id)
         if cid == self._stop_cid:
             self._stop_cid = None

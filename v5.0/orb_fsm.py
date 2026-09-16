@@ -54,18 +54,22 @@ HOLD = "IN_POSITION"
 # ===========================================================================
 @dataclass(frozen=True)
 class FsmParams:
-    tick: float
-    multiplier: float                  # $/点 (MNQ 2.0)
-    risk_per_trade: float
-    atr_stop_fraction: float
-    max_qty: int
+    # 字段单位与语义 (MNQ 现实值):
+    #   1 tick = 0.25 点, 每点 $2 → 1 tick = $0.50/手;
+    #   R = 单笔风险单位 = 止损距离(点): -1R = 打止损, +5R = 赚 5 倍止损距离
+    tick: float                        # 最小变动价位 (点); MNQ 0.25
+    multiplier: float                  # $/点 (MNQ 2.0): 价格 1 点 = 每手 ±$2
+    risk_per_trade: float              # 每笔风险占权益比 (0.7%): 手数 = floor(权益×比例/(止损距离×$2))
+    atr_stop_fraction: float           # 止损距离 = 该比例 × 前一日 14 日 ATR (0.075 = 7.5%)
+    max_qty: int                       # 单笔手数硬帽 (风险手数超过时被压到它)
     leverage_cap: float | None        # 名义杠杆帽: qty×入场价×乘数 ≤ cap×权益; None=不设
-    be_r_multiple: float
-    be_buffer_ticks: int
-    be_use_nominal_r: bool             # BE 判定用名义 ATR 距离 (与 csv r_multiple 口径一致)
-    adjust_stop_to_risk: bool          # 反推止损
-    t_win_start: time
-    t_win_end: time
+    be_r_multiple: float               # 浮盈达 N×R → 拉保本 (5R 推荐; 1-2R 砍右尾, 实测有害)
+    be_buffer_ticks: int               # 保本价 = 入场价 ± N tick (垫成本; 推荐口径 0)
+    be_use_nominal_r: bool             # BE 触发用哪个 R: True=名义 ATR 距离 (反推前, 与 csv
+                                       # r_multiple 同口径、与手数取整解耦); False=实际挂单距离
+    adjust_stop_to_risk: bool          # 反推止损: floor 取整丢的风险预算按公式反向放宽止损补回
+    t_win_start: time                  # 入场窗起点 (9:30): 窗内逐根**收盘价**判突破
+    t_win_end: time                    # 入场窗终点 (10:10, 不含): 窗毕无突破当日放弃
 
     def tick_round(self, px: float) -> float:
         """取整到 tick 网格 (与原版 tick_round 完全一致)。"""
@@ -222,7 +226,9 @@ class OrbFsm:
         if d != self.day:
             self._on_new_day(ts_ns, d)
 
-        # ① 入场窗口: 逐根 bar 收盘价判突破 (对齐原版 on_bar 顺序: 窗口 → BE → 收盘)
+        # ① 入场窗口: 逐根 bar 收盘价判突破 (对齐原版 on_bar 顺序: 窗口 → BE → 收盘)。
+        #    只用收盘价是刻意的: 触及(high/low)判定下 26% 交易日两边同时越界(插针双边歧义),
+        #    收盘价判定修复 (v8.3)。入场当日名额: 提交入场单才置 entered_today
         if p.t_win_start <= t < p.t_win_end and not self.entered_today:
             rng = self.env.range_for(d)
             if rng is not None:
@@ -233,8 +239,11 @@ class OrbFsm:
                     self._signal("SELL", ts_ns, d, c)
                 # 收盘在区间内 → 等下一根
 
-        # ② 持仓: 记浮盈进度 + BE 检查
+        # ② 持仓: 记浮盈进度 + BE 检查。
+        #    ⚠️ 与入场判定(只用收盘价)相反, BE 触发用 high/low: 这里是**单方向**检查
+        #    (多头只看 high, 空头只看 low), 不存在双边歧义; 触及即算 = 止损单真实会被打
         if self.env.be_ok(d, t):
+            # 浮盈 R 按本根有利方向极值计: 多头 (high-入场价)/R, 空头 (入场价-low)/R
             if self.state == HOLD and self.r_pts:
                 if self.entry_side == "BUY":
                     self.peak_r = max(self.peak_r, (h - self.entry_px) / self.r_pts)
@@ -300,6 +309,7 @@ class OrbFsm:
                    equity: float) -> EntryPlan | None:
         """以损定仓 + 反推止损 —— 与原版 _enter 数学逐行一致 (含 epsilon), 便于单测。"""
         p = self.p
+        # 名义止损距离 = 比例×ATR, tick 取整; 下限 1 tick (防 ATR 极小时距离为 0)
         stop_dist = max(p.tick, p.tick_round(p.atr_stop_fraction * atr))
         stop_price = p.tick_round(entry_px - stop_dist) if side == "BUY" \
             else p.tick_round(entry_px + stop_dist)
@@ -307,6 +317,8 @@ class OrbFsm:
         if actual_dist <= 0:
             return None
 
+        # 以损定仓: 风险额 / 每手风险$ = 权益×0.7% / (实际止损距离 × $2/点)。
+        # 注意分母用 actual_dist (tick 取整后的真实距离), 不是名义 stop_dist
         risk_qty = equity * p.risk_per_trade / (actual_dist * p.multiplier)
         if risk_qty > p.max_qty:
             self.n_capped += 1
@@ -327,11 +339,14 @@ class OrbFsm:
                              nominal_dist=stop_dist, lot_exact=False,
                              capped=risk_qty > p.max_qty)
 
+        # 风险手数恰为整数 → 没有取整损失 → 反推被跳过 (反推的前提 = floor 丢了预算)
         lot_exact = abs(risk_qty - round(risk_qty)) < 1e-6 * max(1.0, risk_qty)
         if lot_exact:
             self.n_lot_exact += 1
 
         if p.adjust_stop_to_risk and qty < p.max_qty and not lot_exact and not lev_binding:
+            # 反推公式: 目标距离 = 预算/(手数×$2)。两个护栏:
+            #   1.5× 夹板 = 最多放宽 50% (qty=1 时无夹板可达 +100%, 荒谬)
             target_dist = equity * p.risk_per_trade / (qty * p.multiplier)
             target_dist = min(target_dist, stop_dist * 1.5)
             target_dist = max(p.tick, p.tick_round(target_dist))
@@ -351,6 +366,8 @@ class OrbFsm:
         """入场市价单成交 (可分笔)。第一笔挂止损, 后续只改数量 —— 原版 2026-09-03 修复。"""
         first = (self.state == PENDING)
         if first:
+            # entry_px 锚定**首笔**成交价 (非分笔均价): 止损触发价/R/保本价全部由它推出
+            # (回测与 live 同语义, parity 逐笔对齐的一部分)
             self.entry_px = px
             self.n_entries += 1
             self.state = HOLD
@@ -410,6 +427,9 @@ class OrbFsm:
     # BE (原版 _check_be / _move_stop_to_be)
     # =========================================================================
     def _check_be(self, h: float, l: float):
+        """BE 触发检查: 本根 high/low 触及 入场价 ± N×R 即算成立。
+        r 取名义或实际距离 (be_use_nominal_r); modify 在本根收盘发出 → **下一根**生效
+        (回测/live 同语义, 也是 live 的 BE 出场滑点从下一根算起的口径来源)。"""
         if self.state != HOLD or self.stop_moved or not self.stop_alive:
             return
         r = self.r_nominal if self.p.be_use_nominal_r else self.r_pts

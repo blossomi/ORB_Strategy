@@ -44,34 +44,45 @@ from orb_fsm import FLAT, FsmCommands, FsmEnv, FsmParams, OrbFsm
 # ===========================================================================
 # 参数 (与原版「参数开关区」同值 —— parity 的前提)
 # ===========================================================================
-DATA_DIR = Path(__file__).resolve().parent / "data"      # v5.0 自持数据 (parquet 不进库)
+# 数据两件套 (parquet 不进库, 重建 = 从 archive/ORB_strategy/ 拷):
+#   RTH = 常规时段 (每日 78 根 5m, 09:30-16:00) —— 撮合 + ATR/收盘语义
+#   ETH = 含盘前 (每日 288 根) —— 只为取 9:00-9:30 盘前区间 (RTH 里没有盘前 bar)
+DATA_DIR = Path(__file__).resolve().parent / "data"
 DATA_PATH = str(DATA_DIR / "nq_5min_rth.parquet")
 RANGE_DATA_PATH = str(DATA_DIR / "nq_5min_eth.parquet")
 OUT_DIR = Path(__file__).resolve().parent / "results"
 
+# 样本窗口。⚠️ 起点是使用者手改的"活页": 引用任何数字必须带起点。
+#   硬规则: ≥2016 (2010-2015 数据本身稀疏); 2021 起属样本选择 (跳过 2019-2020)
+END_DATE = "2026-08-30"                  # 数据终点 (覆盖到 08-28 RTH / 08-30 ETH)
 START_DATE = "2021-01-01"
-END_DATE = "2026-08-30"
 
 # ==============================================================================
 # 合约配置信息
 # ==============================================================================
+# 合成连续合约: 整个样本当一张永不换月的合约跑 (GLBX = CME 数据平台标识)。
+#   含义: 换月价差未建模; 好处: 换月日无假仓位/假成交, parity 可逐笔对齐。
 INSTRUMENT_ID = "NQ.GLBX"
 VENUE = "GLBX"
-MULTIPLIER = 2.0
-TICK = 0.25
+MULTIPLIER = 2.0        # MNQ 每点价值 $2: 价格变动 1 点 → 每手盈亏 ±$2 (NQ 大合约是 $20)
+TICK = 0.25             # 最小变动价位 (点): MNQ 1 tick = 0.25 点 = $0.50/手
 PRICE_PRECISION = 2
 
 # ==============================================================================
 #  时间&区间
 # ==============================================================================
 ET = zoneinfo.ZoneInfo("America/New_York")
-T_RANGE_START = dtime(9, 0)
-T_RANGE_END = dtime(9, 30)
-T_WIN_START = dtime(9, 30)
-T_WIN_END = dtime(10, 10)
+T_RANGE_START = dtime(9, 0)    # 盘前区间窗 [9:00, 9:30): 6 根 5m bar 的高/低 = 突破区间
+T_RANGE_END = dtime(9, 30)     # 右端必须配 <: 吞了 9:30 开盘首根 = 灾难 (PF 1.04, 实测)
+T_WIN_START = dtime(9, 30)     # 入场窗 [9:30, 10:10): 逐根**收盘价**判突破 (不用 high/low:
+T_WIN_END = dtime(10, 10)      #  触及判定有双边歧义; 窗毕无突破 → 当日放弃, 不追)
+#  bar 时间戳都是 ET 开盘左标签 (标签 09:30 的 bar 覆盖 09:30:00-09:34:59)
 
-BE_R_MULTIPLE = 5
-BE_BUFFER_TICKS = 1
+# R = 本策略的单笔风险单位 = 止损距离 (点)。+2R = 赚 2 倍止损距离, -1R = 打止损。
+# 收益结构: 胜率仅 ~16%, 全部利润来自右尾 (P95 +9.6R), 左尾被止损封底 ≈ -1.1R
+# —— 任何截断右尾的参数 (紧 BE/止盈/trailing) 都实测伤策略, 改 BE 相关参数前先读 notebook。
+BE_R_MULTIPLE = 5        # 浮盈触及 5×止损距离 → 止损拉到保本 (一次性; 5R 推荐, 1-2R 有害)
+BE_BUFFER_TICKS = 1      # 保本价在入场价上再垫 1 tick 覆盖成本; 锁定推荐口径 = 0
 
 # BE 判定用的 R 取哪一个 (两处 R 在反推生效时会不同):
 #   True  = 反推**之前**的名义 ATR 止损距离 (7.5%×ATR, tick 取整后)
@@ -82,18 +93,24 @@ BE_BUFFER_TICKS = 1
 BE_USE_NOMINAL_R = True
 
 
-ATR_PERIOD = 14
-ATR_STOP_FRACTION = 0.075
-ADJUST_STOP_TO_RISK = True
+ATR_PERIOD = 14             # Wilder 14 日 ATR (ewm alpha=1/14 平滑); 永远用**前一日**值
+ATR_STOP_FRACTION = 0.075   # 止损距离 = 7.5% × 前一日 ATR (点)。5%-10% 合适;
+                            # 0.5%-1% 灾难 (止损小于单根噪声, 实测爆仓)
+ADJUST_STOP_TO_RISK = True  # 反推止损: floor 取整丢了风险预算 → 反向放宽止损距离补回
+                            # (实测中位仅 +1.75%, 复利大手数后趋近 0; 关停评估 = notebook 待办)
 
-STARTING_CAPITAL = 25000
-RISK_PER_TRADE = 0.007
-MAX_QTY = 200
+STARTING_CAPITAL = 25000    # 初始权益: 决定"买不买得起 1 手"(NQ 标准合约 2026 年 1% 风险
+                            # 需 ≥$43k) + 复利路径。小本金必须用 MNQ
+RISK_PER_TRADE = 0.007      # 每笔风险 = 权益 × 0.7% → 手数 = floor(风险额/(止损距离×$2))。
+                            # 0.3%-1.0% 只放大年化/MDD (Sharpe 不动); 1.5% 档 MDD -65% 不可接受
+MAX_QTY = 200               # 单笔手数硬帽: 风险手数超过它时被压到它 (权益后期几乎必触)
 LEVERAGE_CAP = None                 # 名义杠杆帽: qty×入场价×$2 ≤ cap×权益; None=不设
                                     # (敏感性结论见 notebook 持久结论 A「名义杠杆帽」)
 
-COMMISSION_PER_CONTRACT = 0.5
-SLIPPAGE_TICKS = 1
+COMMISSION_PER_CONTRACT = 0.5   # $0.50/手/边 (IB MNQ 实际 ≈$0.49, 含交易所+监管费)
+SLIPPAGE_TICKS = 1              # 滑点 1 tick。⚠️ 实现在 fee_model 里折成固定每手费用
+                                # (见 engine.add_venue) —— 均值口径, 非逐笔随机; 实测滑点
+                                # (slippage_tracker) 出来多少 tick 就用它复测边界参数
 
 FSM_PARAMS = FsmParams(
     tick=TICK, multiplier=MULTIPLIER, risk_per_trade=RISK_PER_TRADE,
@@ -113,6 +130,10 @@ def tick_round(px: float) -> float:
 # 数据管道 (与原版公式逐行一致; 每个文件只读一次)
 # ===========================================================================
 def build_range_map(eth_df: pd.DataFrame) -> dict[ddate, tuple[float, float]]:
+    """每日盘前区间 {date: (high, low)}。
+    右开写法 [9:00, 9:30) 配 <: 命中盘前 6 根 (09:00…09:25), 正确排除开盘首根
+    (标签 09:30, 量 2.3 万手 vs 盘前数百手)。已验证边界敏感性: 只有「盘前 30 分钟、
+    右开」这一档成立, 相邻档全更差 (细节 notebook 持久结论 A)。"""
     df = eth_df.tz_convert(ET)
     t = df.index.time
     df = df[(t >= T_RANGE_START) & (t < T_RANGE_END)]
@@ -123,6 +144,9 @@ def build_range_map(eth_df: pd.DataFrame) -> dict[ddate, tuple[float, float]]:
 
 
 def build_atr_map(rth_df: pd.DataFrame) -> dict[ddate, float]:
+    """每日 ATR {date: 前一日 ATR 点数}。
+    Wilder 平滑 = TR 的 ewm(alpha=1/14) (TR = 三值取大: 高低差 / |高-昨收| / |低-昨收|)。
+    shift(1) = 用**前一日**的 ATR —— 当日还没走完, 用当日值 = 未来函数。"""
     df = rth_df.tz_convert(ET)
     day = (df.resample("1D")
            .agg(high=("high", "max"), low=("low", "min"), close=("close", "last"))
@@ -137,6 +161,9 @@ def build_atr_map(rth_df: pd.DataFrame) -> dict[ddate, float]:
 
 
 def build_day_last_bar_map(rth_df: pd.DataFrame) -> dict[ddate, dtime]:
+    """每日实际最后一根 5m bar 的标签时刻 (常态 15:55, 半日市 12:50)。
+    EOD 平仓锚定它而非固定 15:55 —— 修复"半日市跨夜"bug (半日在 12:50 收口,
+    固定 15:55 会拿着仓位从 12:50 裸奔到隔夜)。"""
     df = rth_df.tz_convert(ET)
     ts = df.index.to_series()
     last = ts.groupby(ts.dt.normalize()).max()
@@ -340,6 +367,8 @@ def export_trades_csv(engine, out_path, atr_map):
         r_mult = pnl / (qty * stop_dist * MULTIPLIER) if (stop_dist and stop_dist > 0) else None
 
         ctype, trig = closing.get(p["closing_order_id"], ("MARKET", None))
+        # 出场归因启发式: 保本止损的触发价 ≈ 入场价(+1 tick 缓冲), 与初始止损
+        # (7.5%×ATR, 近年 30+ 点) 差一个量级 → 2 点阈值足以区分两者
         if "STOP" in ctype:
             reason = "保本止损" if (trig is not None and abs(trig - entry_px) < 2.0) else "初始止损"
         else:
@@ -361,6 +390,9 @@ def export_trades_csv(engine, out_path, atr_map):
 
 
 def print_stats(engine, strategy, sample_df):
+    """绩效指标 (口径提示): 年化 = CAGR = (终值/本金)^(1/年数)-1; Sharpe/Sortino 由
+    **日收益率** ×√252 年化 (日内策略无隔夜持仓, 日粒度无哑区间); R/PF 等逐笔口径
+    见 export_trades_csv。本策略 Sortino ≫ Sharpe (右偏长尾), 降权 Sharpe。"""
     acct = engine.trader.generate_account_report(Venue(VENUE))
     eq = acct['total'].astype(float)
     eq.index = pd.to_datetime(acct.index)
@@ -441,6 +473,10 @@ if __name__ == "__main__":
     engine.add_venue(
         venue=Venue(VENUE), oms_type=OmsType.NETTING, account_type=AccountType.MARGIN,
         base_currency=USD, starting_balances=[Money(STARTING_CAPITAL, USD)],
+        # 成本建模: 滑点折进固定每手费用 (每边 = 佣金 + N tick × $2)。
+        # 这是均值口径而非逐笔随机滑点 —— 数字对"平均每边成本"敏感、对滑点分布形状不敏感;
+        # 1 tick 来回 = $2/手, 在低波动年 (2017 止损中位 3.67pt) 占 1R 比例爆炸, 是
+        # 回测数字最大的不真实来源 (真实滑点以 slippage_tracker 实测为准)
         fee_model=PerContractFeeModel(
             Money(COMMISSION_PER_CONTRACT + SLIPPAGE_TICKS * TICK * MULTIPLIER, USD)))
     engine.add_instrument(instrument)
