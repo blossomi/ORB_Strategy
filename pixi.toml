@@ -58,7 +58,7 @@ default = { solve-group = "default" }
 research = { features = ["research"], solve-group = "default" }
 
 [tasks]
-test = "python v5.0/test_fsm.py"
+test = "python v5.0/test_fsm.py && python v5.0/test_atr_source.py"
 backtest = "python v5.0/orb_backtest.py"
 live = "python v5.0/orb_live.py"
 verify = "python v5.0/verify_live.py A && python v5.0/verify_live.py B && python v5.0/verify_live.py C"

@@ -3,3 +3,4 @@ _verify_orig_*.csv
 _verify_cand_*.csv
 live_slippage.csv
 __pycache__/
+data/atr_status.json

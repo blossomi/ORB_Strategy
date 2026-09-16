@@ -11,8 +11,10 @@
 | `orb_fsm.py` | **状态机核心**（纯 Python，无 nautilus 依赖）。状态 `FLAT → PENDING_ENTRY → IN_POSITION → FLAT` + 安全迁移；环境端口 `FsmEnv`（权益/ATR/区间/收盘语义——回测/live 差异唯一收口处）+ 命令端口 `FsmCommands`（下单/改单/撤单/平仓/闹钟）。**回测与 live 共用这一个文件** |
 | `orb_backtest.py` | 回测主线：FSM 适配层 + 快数据管道 |
 | `orb_live.py` | live 主线：FSM 适配层 + IB 接入 + 滑点记录；**P1-1/P1-2/P2-1 已实现** + 三个原版没有的防护 |
+| `atr_source.py` | **live ATR 数据层（2026-09-16 起）**：NDX 指数日线 → 磁盘表 `data/ndx_daily.parquet`（多源补缺+交叉校验，禁混源）；Wilder 14日ATR 递推 + 假日语义 + 陈旧分层降级。live 收盘后 17:10 ET 定时更新、失败重试+桌面告警；启动/换日从表重算（**不再向 IB 请求日线**）。可独立跑：`python atr_source.py`（`--full` bootstrap / `--atr` / `--status`） |
 | `slippage_tracker.py` | 滑点记录（自持副本，源 = archive/live/） |
 | `test_fsm.py` | 11 组纯 FSM 单元测试（秒级，不需要引擎） |
+| `test_atr_source.py` | ATR 数据层测试：递推公式对账 / 新鲜度 / 合并 append-only / 全源失败 / 引擎内 glue（表 ATR 驱动真实成交 + 重试 ladder） |
 | `verify_live.py` | 引擎内回归 A/B/C：v5.0 live vs 原版（archive/live）**同数据双跑逐笔 diff** |
 | `parity_check.py` | 回测逐笔 CSV 裁判：v5.0 输出 vs 归档原版基线（archive/ORB_strategy/html_output/v8_4_trades_25000.csv） |
 | `data/` | 自持数据：`nq_5min_rth.parquet` + `nq_5min_eth.parquet`（不进库；重建 = 从 archive/ORB_strategy/ 拷） |

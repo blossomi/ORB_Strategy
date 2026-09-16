@@ -15,6 +15,9 @@ verify_live.py 已验证与原版逐笔对齐 (A/B/C 全绿)。
   ✓ P2-1 止损单 GTD 当日过期 (flat_at+2min): 双保险防跨日残留单。
   ✓ 新增 (原版没有): 持仓中止损单被撤/被拒 → 立即重挂 + error; live 迟到成交
     (EOD 后才 fill) → 立即平仓, 不挂隔夜止损。
+  ✓ ATR 数据层换外源 NDX 磁盘表 (atr_source.py, 2026-09-16 研判): 收盘后 17:10 ET
+    定时更新 + 失败重试/桌面告警; 启动与换日从表重算, 不再向 IB 请求日线。
+    表陈旧 ≤5 日历日 → 告警但照常交易; 缺失/超限 → 当日不开仓 (FSM atr=None 语义)。
   其余行为 (信号/定价/BE/滑点记录/DRY_RUN/日志审计) 与原版逐笔对齐。
 
 用法:
@@ -49,6 +52,8 @@ from nautilus_trader.trading.strategy import Strategy
 # SlippageTracker = v5.0 自持副本 (源 archive/live/, 2026-09-15 拷贝)
 from slippage_tracker import SlippageTracker  # noqa: E402
 
+from atr_source import (ATR_PERIOD, ATR_STALE_DAYS, atr_from_table,  # noqa: E402
+                        load_table, notify_desktop, table_freshness, update_table)
 from orb_fsm import HOLD, FsmCommands, FsmEnv, FsmParams, OrbFsm  # noqa: E402
 
 # ===========================================================================
@@ -68,13 +73,11 @@ MULTIPLIER = 2.0 if SYMBOL == "MNQ" else 20.0
 DRY_RUN = True
 
 RISK_PER_TRADE = 0.007
-ATR_PERIOD = 14
 ATR_STOP_FRACTION = 0.075
 BE_R_MULTIPLE = 5.0
 BE_BUFFER_TICKS = 0
 MAX_QTY = 50
-ATR_LOOKBACK_DAYS = 120
-ATR_OVERRIDE_PTS = None
+ATR_OVERRIDE_PTS = None              # 人工兜底: 表不可用时手动钉死 ATR (点)
 
 MARKET_DATA_TYPE = MarketDataTypeEnum.REALTIME
 
@@ -96,13 +99,17 @@ NQ_CONTRACT = IBContract(
 )
 INSTRUMENT_ID = f"{SYMBOL}{LOCAL_SYMBOL}.CME"
 BAR_TYPE_STR = f"{INSTRUMENT_ID}-5-MINUTE-LAST-EXTERNAL"
-DAILY_BAR_TYPE_STR = f"{INSTRUMENT_ID}-1-DAY-LAST-EXTERNAL"
 
 ET = ZoneInfo("America/New_York")
 
 EOD_TIMER_NAME = "eod_flat"          # P1-1
 EOD_TIMER_PAD = timedelta(minutes=5, seconds=2)   # flat_at + 5min + 2s
 STOP_GTD_PAD = timedelta(minutes=2)              # P2-1: 止损 flat_at+2min 过期
+
+ATR_UPDATE_TIMER = "atr_update"
+ATR_UPDATE_AT = time(17, 10)         # 指数 16:00 收盘 → 留出发布时间 (研判: 盘后更新为主)
+ATR_UPDATE_RETRIES = 3
+ATR_UPDATE_RETRY_PAD = timedelta(minutes=60)
 
 
 def tick_round(px: float) -> float:
@@ -162,6 +169,7 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
         self.dry_run = bool(config.dry_run)
         self.atr_map = atr_map                                  # None = 实盘模式
         self._atr_px: float | None = None
+        self._atr_upd_attempts = 0                              # 收盘更新连续失败计数
 
         self.slip = SlippageTracker(SLIP_CSV, tick=TICK, multiplier=MULTIPLIER,
                                     stale_ms=SLIP_STALE_MS)
@@ -190,44 +198,95 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
     def on_start(self):
         self.subscribe_bars(self.bar_type)
         if self.atr_map is None:
-            self._request_atr()
+            self._refresh_atr(datetime.now(ET).date(), "启动")
+            self._arm_atr_update()
         self._log(f"[启动] 已订阅 {self.bar_type} | 合约 {self.instrument_id} "
                   f"({SYMBOL}, ${MULTIPLIER:g}/点) | 风险 {self.risk_per_trade:.1%}/笔, "
-                  f"上限 {self.max_qty} 手 | 止损 {self.atr_stop_fraction:.1%}×{ATR_PERIOD}日ATR | "
+                  f"上限 {self.max_qty} 手 | 止损 {self.atr_stop_fraction:.1%}×{ATR_PERIOD}日ATR"
+                  f"(NDX 表) | "
                   f"{self.be_r_multiple:g}R 拉保本 | EOD 闹钟 {EOD_TIMER_PAD} | "
                   f"{'DRY_RUN 只记信号' if self.dry_run else '!!! 真实下单模式 !!!'}")
         self._log(f"[启动] 滑点落盘 {SLIP_CSV} | 运行记录 "
                   f"{os.path.basename(_log_path) if _log_path else 'logs/live_*.log'}")
 
-    def _request_atr(self):
-        start = datetime.now(ET) - timedelta(days=ATR_LOOKBACK_DAYS)
-        self.request_bars(BarType.from_str(DAILY_BAR_TYPE_STR), start)
-        self._log(f"已请求日线 (近 {ATR_LOOKBACK_DAYS} 天) 以计算前一日 {ATR_PERIOD}日ATR")
+    # ---------------- ATR: NDX 外源磁盘表 (不再向 IB 请求日线) ----------------
+    def _refresh_atr(self, as_of, reason: str) -> None:
+        """as_of 当日 ATR ← 磁盘表重算 (研判②分层降级):
+        表陈旧 >5 日历日/缺失 → 先补拉一轮; 仍陈旧 ≤5 日 → ⚠️ 用旧值照常交易;
+        缺失/行数不足 → atr=None → FSM 当日不开仓。"""
+        df = load_table()
+        stale, last = table_freshness(df, as_of)
+        if stale > ATR_STALE_DAYS:
+            self._log(f"[ATR] 表{'缺失' if df is None else f'陈旧 {stale} 天 (最新 {last})'}"
+                      f" → 补拉一轮")
+            res = update_table(log=self._log)
+            if not res["ok"]:
+                self._atr_alert(f"ATR 表补拉失败: {res['error']}")
+            df = load_table()
+            stale, last = table_freshness(df, as_of)
+        self._atr_px = atr_from_table(df, as_of)
+        if self._atr_px is None:
+            self._atr_alert("ATR 不可用 (表缺失或行数不足) → 当日不开仓")
+            return
+        note = (f" ⚠️ 表陈旧 {stale} 天 (最新 {last:%Y-%m-%d}), 按研判用旧值照常交易"
+                " —— 请检查收盘更新通道" if stale > ATR_STALE_DAYS else "")
+        self._log(f"[ATR] {reason}: {ATR_PERIOD}日ATR = {self._atr_px:.2f} pt "
+                  f"(表最新 {last:%Y-%m-%d}) → 止损距离 {self.atr_stop_fraction:.1%}×ATR = "
+                  f"{tick_round(self._atr_px * self.atr_stop_fraction):.2f} pt{note}")
 
-    def on_historical_data(self, data):
-        if self.atr_map is not None or data is None:
+    def _arm_atr_update(self) -> None:
+        """收盘后更新闹钟 (研判: 盘后更新为主, 启动校验为辅):
+        今日 17:10 未过则今日, 否则明日; 触发后在本回调内续订。"""
+        now = datetime.now(ET)
+        at = datetime.combine(now.date(), ATR_UPDATE_AT, tzinfo=ET)
+        if at <= now:
+            at += timedelta(days=1)
+        try:
+            self.clock.cancel_timer(ATR_UPDATE_TIMER)
+        except Exception:
+            pass
+        self.clock.set_time_alert(ATR_UPDATE_TIMER, at.astimezone(timezone.utc),
+                                  callback=self._on_atr_update_timer, override=True)
+        self.timers_armed.append(("atr_update", int(at.timestamp() * 1e9)))
+        self._log(f"[ATR] 收盘更新闹钟 {at:%m-%d %H:%M} ET "
+                  f"(失败重试 ≤{ATR_UPDATE_RETRIES - 1} 次 / 间隔 "
+                  f"{ATR_UPDATE_RETRY_PAD.total_seconds() / 60:.0f}min)")
+
+    def _rearm_atr_after(self, delay: timedelta) -> None:
+        at = datetime.now(ET) + delay
+        try:
+            self.clock.cancel_timer(ATR_UPDATE_TIMER)
+        except Exception:
+            pass
+        self.clock.set_time_alert(ATR_UPDATE_TIMER, at.astimezone(timezone.utc),
+                                  callback=self._on_atr_update_timer, override=True)
+        self.timers_armed.append(("atr_retry", int(at.timestamp() * 1e9)))
+
+    def _on_atr_update_timer(self, event) -> None:
+        res = update_table(log=self._log)
+        if res["ok"]:
+            self._atr_upd_attempts = 0
+            warn = f" | ⚠️ {'; '.join(res['warn'])}" if res["warn"] else ""
+            self._log(f"[ATR更新] 收盘更新完成 (源 {res['source']}, "
+                      f"+{res['added']} 行){warn}")
+            self._arm_atr_update()
             return
-        rows = []
-        today = datetime.now(ET).date()
-        for b in data:
-            d = datetime.fromtimestamp(b.ts_event / 1e9, tz=timezone.utc).astimezone(ET).date()
-            if d < today:                       # 只用已走完的交易日
-                rows.append((d, b.high.as_double(), b.low.as_double(), b.close.as_double()))
-        rows.sort()
-        if len(rows) < ATR_PERIOD + 1:
-            self._log(f"日线只有 {len(rows)} 根 (<{ATR_PERIOD + 1}), 无法算 ATR", level="error")
-            return
-        trs = []
-        for i in range(1, len(rows)):
-            _, h, l, pc = rows[i][0], rows[i][1], rows[i][2], rows[i - 1][3]
-            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-        atr = trs[0]                            # Wilder 递推
-        for tr in trs[1:]:
-            atr = (atr * (ATR_PERIOD - 1) + tr) / ATR_PERIOD
-        self._atr_px = atr
-        self._log(f"[ATR] 前一日 {ATR_PERIOD}日ATR = {atr:.2f} pt → "
-                  f"止损距离 {self.atr_stop_fraction:.1%}×ATR = "
-                  f"{tick_round(atr * self.atr_stop_fraction):.2f} pt")
+        self._atr_upd_attempts += 1
+        if self._atr_upd_attempts < ATR_UPDATE_RETRIES:
+            self._log(f"[ATR更新] 失败: {res['error']} "
+                      f"(第 {self._atr_upd_attempts}/{ATR_UPDATE_RETRIES} 次) → 重试",
+                      level="warning")
+            self._rearm_atr_after(ATR_UPDATE_RETRY_PAD)
+        else:
+            self._atr_alert(f"收盘 ATR 更新连续 {ATR_UPDATE_RETRIES} 次失败: "
+                            f"{res['error']} —— 明早开盘前请手动跑 atr_source.py")
+            self._atr_upd_attempts = 0
+            self._arm_atr_update()               # 明日照常再试, 告警已发出
+
+    def _atr_alert(self, msg: str) -> None:
+        """及时提醒: error 进日志 (logs/live_*.log 可 grep) + 桌面通知 (darwin)。"""
+        self._log(f"[ATR告警] {msg}", level="error")
+        notify_desktop("ORB live · ATR", msg)
 
     def on_stop(self):
         try:                                    # P1-1: 防残留回调
@@ -281,10 +340,11 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
         return self._net_pos()
 
     def on_new_day(self, d) -> None:
-        """换日: 重置盘前区间 (否则跨日累积会越滚越宽, 信号越来越少) + 实盘刷新 ATR。"""
+        """换日: 重置盘前区间 (否则跨日累积会越滚越宽, 信号越来越少) + 从表刷新 ATR
+        (昨晚收盘更新已入库 → 换日重算即含昨日; 昨晚失败则走 _refresh_atr 的分层降级)。"""
         self._rng_hi = self._rng_lo = None
         if self.atr_map is None:
-            self._request_atr()
+            self._refresh_atr(d, f"换日 {d}")
         self._log(f"—— 新交易日 {d} ——")
 
     # ---------------- FsmCommands 实现 ----------------
