@@ -17,6 +17,7 @@ import json
 import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -198,10 +199,100 @@ def ATR_FMT(v):
     return f"= {v:.2f} pt"
 
 
+# ---------------------------------------------------------------- 6 区间就绪闹钟
+def test_live_range_check_timer():
+    """区间就绪兜底闹钟 + range_status 完整度 + 与 FSM 诊断互斥。
+
+    引擎内建 ~1 周窗口拿到真实 clock (裸 strategy 的 clock 是抽象桩, timestamp_ns
+    直接 NotImplementedError), 然后直接驱动 _on_range_check_timer 覆盖各分支。
+    """
+    import orb_backtest as ob
+    import orb_live as ol
+
+    eth = pd.read_parquet(ob.RANGE_DATA_PATH)
+    et_lookup: dict = {}
+    orig = (ob.START_DATE, ob.END_DATE)
+    ob.START_DATE, ob.END_DATE = "2021-09-20", "2021-09-24"     # 5 个交易日
+    try:
+        bars, instrument, bar_type, _ = ob.build_bars_and_instrument(eth, et_lookup)
+    finally:
+        ob.START_DATE, ob.END_DATE = orig
+
+    from nautilus_trader.backtest.engine import BacktestEngine
+    from nautilus_trader.config import BacktestEngineConfig, LoggingConfig
+    engine = BacktestEngine(config=BacktestEngineConfig(
+        trader_id=ob.TraderId("RANGE-TEST"), logging=LoggingConfig(log_level="ERROR")))
+    engine.add_venue(venue=ob.Venue(ob.VENUE), oms_type=ob.OmsType.NETTING,
+                     account_type=ob.AccountType.MARGIN, base_currency=ob.USD,
+                     starting_balances=[ob.Money(ob.STARTING_CAPITAL, ob.USD)],
+                     fee_model=ob.PerContractFeeModel(ob.Money(1.0, ob.USD)))
+    engine.add_instrument(instrument)
+    engine.add_data(bars)
+    cfg = ol.OrbFsmLiveConfig(
+        instrument_id=ob.INSTRUMENT_ID, bar_type=str(bar_type),
+        risk_per_trade=0.007, atr_stop_fraction=0.075, be_r_multiple=5.0,
+        be_buffer_ticks=0, max_qty=50, multiplier=2.0, dry_run=True)
+    s = ol.OrbFsmLiveStrategy(cfg, atr_map={})     # atr_map 非 None → 不碰磁盘表/网络
+    logs = []
+    s._log = lambda m, level="info": logs.append((level, m))
+    engine.add_strategy(s)
+    engine.run()
+
+    # ① 每个交易日各登记一次闹钟, 时刻 = 9:30 ET + RANGE_CHECK_PAD
+    armed = [ns for name, ns in s.timers_armed if name == "range_check"]
+    assert len(armed) == 5, f"5 个交易日应各登记 1 次: {s.timers_armed}"
+    d0 = date(2021, 9, 21)
+    expect = int((datetime.combine(d0, ol.T_WIN_START, tzinfo=ET)
+                  + ol.RANGE_CHECK_PAD).timestamp() * 1e9)
+    assert expect in armed, (expect, armed)
+
+    alerts = []
+    orig_notify = ol.notify_desktop
+    ol.notify_desktop = lambda title, msg: alerts.append((title, msg)) or True
+    try:
+        ev = SimpleNamespace(ts_event=expect)
+
+        # ② FSM 已在窗口首根判过 → 闹钟不发话 (两路互斥, 不重复告警)
+        s.fsm.range_checked_day, s.fsm.entered_today = d0, False
+        logs.clear()
+        s._on_range_check_timer(ev)
+        assert not alerts and not logs, (alerts, logs)
+
+        # ③ bar 断流 (盘前一根 bar 都没到) → 缺失告警 + 桌面通知
+        s.fsm.range_checked_day = None
+        s._rng_hi = s._rng_lo = None
+        s._rng_n = 0
+        s._on_range_check_timer(ev)
+        assert len(alerts) == 1 and "缺失" in alerts[0][1] and "0 根" in alerts[0][1], alerts
+        assert any(lv == "error" and "区间告警" in m for lv, m in logs), logs
+
+        # ④ 残缺 (6 根只到 2 根) → 点名残缺; 但不改行为 (range_for 照常返回区间)
+        logs.clear()
+        alerts.clear()
+        s._rng_hi, s._rng_lo, s._rng_n = 20100.0, 20000.0, 2
+        s._on_range_check_timer(ev)
+        assert len(alerts) == 1 and "残缺" in alerts[0][1] and "2/6" in alerts[0][1], alerts
+        assert s.range_status(d0) == "partial"
+        assert s.range_for(d0) == (20100.0, 20000.0), "残缺区间仍照常供值 (只告警)"
+
+        # ⑤ 6 根齐 → ok, 闹钟只留一行 info (数据通路健康确认)
+        logs.clear()
+        alerts.clear()
+        s._rng_n = ol.RANGE_BARS_EXPECTED
+        s._on_range_check_timer(ev)
+        assert not alerts and s.range_status(d0) == "ok"
+        assert any("区间就绪" in m for _, m in logs), logs
+    finally:
+        ol.notify_desktop = orig_notify
+    engine.dispose()
+    ok("live_range_check_timer")
+
+
 if __name__ == "__main__":
     test_atr_values()
     test_freshness()
     test_merge()
     test_update_all_fail()
     test_live_glue()
+    test_live_range_check_timer()
     print(f"\n全部 {len(_PASSED)} 组用例通过 ✔")

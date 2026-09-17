@@ -30,6 +30,8 @@ orb_fsm.py — v8.4 ORB 策略显式状态机核心 (纯 Python, 无 nautilus �
           反推止损 ≤ 1.5×名义距离 —— 全部照抄原版数学, 含 epsilon
   - BE: 浮盈触及 N R (bar.high/low) → 收盘时 modify 止损到保本+缓冲, 下一根生效
   - EOD: 回测=当日最后一根 bar; live=flat_at (15:55/半日 12:50) + 定时闹钟双保险
+  - 数据就绪诊断: 区间缺失/残缺 (range_status) 与 ATR 不可用各自每日首报一次 ——
+    只告警不改行为 (跳过残缺日属策略语义变更, 需单独决定)
   - 重入安全: 回测引擎在 submit 内同步成交 → on_entry_fill 会在 submit_entry_market
     返回前被调回, FSM 不假设调用后的状态
 """
@@ -41,6 +43,10 @@ from math import floor
 FLAT = "FLAT"
 PENDING = "PENDING_ENTRY"
 HOLD = "IN_POSITION"
+
+# 盘前区间 [9:00, 9:30) 在 5m 网格上的预期 bar 根数 —— 适配层 range_status 判「残缺」用。
+# 定义在核心而非各适配层: 避免又出现参数「第三份拷贝」(见下面 FsmParams 头注)。
+RANGE_BARS_EXPECTED = 6
 
 
 # ===========================================================================
@@ -103,6 +109,20 @@ class FsmEnv:
     def range_for(self, d: date) -> tuple[float, float] | None:
         """盘前区间 (high, low)。None → 无区间数据, 不判突破。"""
         raise NotImplementedError
+
+    def range_status(self, d: date) -> str:
+        """盘前区间就绪度: "ok" / "partial" / "missing" (纯诊断, 不参与决策)。
+
+        基类默认只能按 range_for 二分 —— **适配层应覆盖**为真实完整度: live 的区间是
+        逐根累积的,「只到了 2/6 根」同样返回一个合法但**偏窄**的区间, 只查 None 抓不到
+        (偏窄 → 突破概率被高估; notebook 持久结论 A 记了 12 天这类缺口)。
+        """
+        return "ok" if self.range_for(d) is not None else "missing"
+
+    def atr_status(self, d: date) -> str:
+        """ATR 就绪度: "ok" / "missing" (纯诊断, 决策只看 atr_for)。"""
+        a = self.atr_for(d)
+        return "ok" if (a is not None and a > 0) else "missing"
 
     def be_ok(self, d: date, t: time) -> bool:
         """这根 bar 是否还查 BE (回测: 非当日最后一根; live: t < flat_at)。"""
@@ -176,6 +196,8 @@ class OrbFsm:
         self.entered_today = False           # 已提交入场 (当日名额占用)
         self.cant_afford_today = False
         self.day_closed = False              # 收盘平仓/日终记账 已做 (幂等闸)
+        self.range_checked_day: date | None = None   # 盘前区间就绪已判过的日子 (每日仅窗口首根判一次)
+        self.atr_warned_day: date | None = None      # ATR 缺失告警已发过的日子 (每日仅一次)
 
         # ---- 计数 (与原版同名) ----
         self.n_signals = 0
@@ -189,6 +211,9 @@ class OrbFsm:
         self.n_capped = 0
         self.n_lot_exact = 0
         self.n_lev_capped = 0
+        # 数据就绪诊断计数 (纯观测, 不影响任何决策路径)
+        self.n_range_warned = 0              # 区间缺失/残缺的告警天数
+        self.n_atr_missing_days = 0          # ATR 不可用导致丢弃信号的天数
         # 新防护路径的计数 (干净数据下恒为 0 —— parity 断言用)
         self.n_overnight_flattens = 0
         self.n_stop_replaces = 0
@@ -229,9 +254,27 @@ class OrbFsm:
         # ① 入场窗口: 逐根 bar 收盘价判突破 (对齐原版 on_bar 顺序: 窗口 → BE → 收盘)。
         #    只用收盘价是刻意的: 触及(high/low)判定下 26% 交易日两边同时越界(插针双边歧义),
         #    收盘价判定修复 (v8.3)。入场当日名额: 提交入场单才置 entered_today
-        if p.t_win_start <= t < p.t_win_end and not self.entered_today:
+        if p.t_win_start <= t < p.t_win_end:
+            # 区间每根 bar 只取一次 (旧版同一根 bar 调两次 range_for)
             rng = self.env.range_for(d)
-            if rng is not None:
+            # 就绪度诊断: 每个交易日只在窗口第一根 bar 上判一次。守卫**只 key 在 d 上** ——
+            # 旧版把它嵌在 `not entered_today` 里, 入场分支一改 (如放开重入) 这条诊断的
+            # 语义会跟着静默漂移。
+            # ⚠️ 这条日志本身依赖 bar 送达: 断线时 bar 不来, 它和它要检测的故障一起静默。
+            # live 侧的兜底是与 bar 流解耦的独立闹钟 (orb_live 的 range_check timer),
+            # 该闹钟以 `range_checked_day` 是否已推进来判「FSM 是否已经看到窗口」→ 两路互斥。
+            if self.range_checked_day != d:
+                self.range_checked_day = d
+                st = self.env.range_status(d)
+                if st != "ok":
+                    detail = ("盘前区间缺失 → 无法判突破; 若区间稍后就绪, 后续 bar 仍会正常入场"
+                              if st == "missing" else
+                              f"盘前区间残缺 (实收 bar < {RANGE_BARS_EXPECTED} 根) → 区间偏窄, "
+                              f"突破信号可能失真")
+                    self._log(f"[入场] {d} {t} 入场窗口开启 range_status={st} — {detail}",
+                              "error" if st == "missing" else "warning")
+                    self.n_range_warned += 1
+            if not self.entered_today and rng is not None:
                 hi, lo = rng
                 if c > hi:
                     self._signal("BUY", ts_ns, d, c)
@@ -287,7 +330,16 @@ class OrbFsm:
     def _signal(self, side: str, ts_ns: int, d: date, close_px: float):
         atr = self.env.atr_for(d)
         if atr is None or atr <= 0:
-            return                          # 原版: 直接 return, 不占当日名额
+            # 原版: 直接 return, 不占当日名额 —— 但**零日志**: 数据层挂了却表现为
+            # 「今天没信号」, 属于最该告警却最安静的一类。现在每日首报一次 (error),
+            # 同日后续 bar 静默 (同一原因不刷屏)。
+            if self.atr_warned_day != d:
+                self.atr_warned_day = d
+                self.n_atr_missing_days += 1
+                self._log(f"[入场] {d} 突破信号被丢弃: ATR 不可用 "
+                          f"(atr_status={self.env.atr_status(d)}, atr={atr}) → 当日不开仓",
+                          "error")
+            return                          # 不占当日名额 (原版行为)
         plan = self.plan_entry(side, close_px, atr, self.env.equity())
         if plan is None:
             return                          # actual_dist<=0, 同原版

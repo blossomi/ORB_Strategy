@@ -15,6 +15,9 @@ verify_live.py 已验证与原版逐笔对齐 (A/B/C 全绿)。
   ✓ P2-1 止损单 GTD 当日过期 (flat_at+2min): 双保险防跨日残留单。
   ✓ 新增 (原版没有): 持仓中止损单被撤/被拒 → 立即重挂 + error; live 迟到成交
     (EOD 后才 fill) → 立即平仓, 不挂隔夜止损。
+  ✓ 新增 (原版没有): 区间就绪兜底闹钟 (9:31) + range_status 完整度检查 —— bar 断流时
+    FSM 的诊断跟着静默, 这条闹钟不依赖 bar 到达; 区间「只到了 2/6 根」的偏窄区间
+    也会被点名 (旧版只查 None, 抓不到残缺)。
   ✓ ATR 数据层换外源 NDX 磁盘表 (atr_source.py, 2026-09-16 研判): 收盘后 17:10 ET
     定时更新 + 失败重试/桌面告警; 启动与换日从表重算, 不再向 IB 请求日线。
     表陈旧 ≤5 日历日 → 告警但照常交易; 缺失/超限 → 当日不开仓 (FSM atr=None 语义)。
@@ -54,7 +57,8 @@ from slippage_tracker import SlippageTracker  # noqa: E402
 
 from atr_source import (ATR_PERIOD, ATR_STALE_DAYS, atr_from_table,  # noqa: E402
                         load_table, notify_desktop, table_freshness, update_table)
-from orb_fsm import HOLD, FsmCommands, FsmEnv, FsmParams, OrbFsm  # noqa: E402
+from orb_fsm import (HOLD, RANGE_BARS_EXPECTED, FsmCommands, FsmEnv,  # noqa: E402
+                     FsmParams, OrbFsm)
 
 # ===========================================================================
 # ★ 配置区 —— 与 live/live_ib_demo.py 保持一致 (parity 的前提)
@@ -118,6 +122,10 @@ ATR_UPDATE_TIMER = "atr_update"
 ATR_UPDATE_AT = time(17, 10)         # 指数 16:00 收盘 → 留出发布时间 (研判: 盘后更新为主)
 ATR_UPDATE_RETRIES = 3
 ATR_UPDATE_RETRY_PAD = timedelta(minutes=60)
+
+RANGE_CHECK_TIMER = "range_check"    # 区间就绪兜底闹钟 —— 与 bar 流解耦 (bar 断流时
+                                     # FSM 的 on_bar 诊断同样静默, 见 _arm_range_check_timer)
+RANGE_CHECK_PAD = timedelta(minutes=1)   # 窗口开后 1min (9:31 ET): 给 9:29 bar 留到达时间
 
 
 def tick_round(px: float) -> float:
@@ -187,6 +195,7 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
 
         self._rng_hi: float | None = None
         self._rng_lo: float | None = None
+        self._rng_n = 0                                         # 盘前 bar 计数 → range_status
         self._last_bar_date = None                              # bar 留痕用 (与 FSM.day 独立)
 
         self.timers_armed: list[tuple[str, int]] = []           # 验证用: 闹钟登记记录
@@ -299,10 +308,11 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
         notify_desktop("ORB live · ATR", msg)
 
     def on_stop(self):
-        try:                                    # P1-1: 防残留回调
-            self.clock.cancel_timer(EOD_TIMER_NAME)
-        except Exception:
-            pass
+        for timer in (EOD_TIMER_NAME, RANGE_CHECK_TIMER):
+            try:                                # P1-1 / 区间检查: 防残留回调
+                self.clock.cancel_timer(timer)
+            except Exception:
+                pass
         f = self.fsm
         self._log(f"[停止] 当日统计: 信号 {f.n_signals} | 入场 {f.n_entries} | "
                   f"拉保本 {f.n_be_moves} | 止损出场 {f.n_stopped} | "
@@ -340,6 +350,14 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
             return None
         return (self._rng_hi, self._rng_lo)
 
+    def range_status(self, d) -> str:
+        """区间就绪度。live 的区间是**逐根累积**的 ⇒ 必须在场计数:
+        只查 None 会把「6 根只到了 2 根」的偏窄区间当正常, 而偏窄区间会高估突破概率
+        (notebook 持久结论 A「已知数据缺口」: 3,627 天里 12 天盘前 bar 数 ≠ 6)。"""
+        if self._rng_hi is None or self._rng_lo is None:
+            return "missing"
+        return "ok" if self._rng_n >= RANGE_BARS_EXPECTED else "partial"
+
     def be_ok(self, d, t) -> bool:
         return t < flat_at_for(d)
 
@@ -353,9 +371,51 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
         """换日: 重置盘前区间 (否则跨日累积会越滚越宽, 信号越来越少) + 从表刷新 ATR
         (昨晚收盘更新已入库 → 换日重算即含昨日; 昨晚失败则走 _refresh_atr 的分层降级)。"""
         self._rng_hi = self._rng_lo = None
+        self._rng_n = 0
         if self.atr_map is None:
             self._refresh_atr(d, f"换日 {d}")
+        self._arm_range_check_timer(d)
         self._log(f"—— 新交易日 {d} ——")
+
+    # ---------------- 区间就绪兜底闹钟 (与 bar 流解耦) ----------------
+    def _arm_range_check_timer(self, d) -> None:
+        """窗口开后 RANGE_CHECK_PAD 检查盘前区间就绪度。
+
+        为什么需要它: FSM 的就绪诊断挂在 on_bar 上 —— bar 流断了 (正好是区间缺失的典型
+        成因) 它同样静默。这条闹钟不依赖任何 bar 到达。
+        与 FSM 诊断的分工 (互斥不重复): FSM 已在窗口首根判过当日 (range_checked_day == d)
+        → 本闹钟不说话; 只有 FSM 压根没看到窗口 (bar 断流/迟到) 时才由闹钟报警。
+        """
+        at = datetime.combine(d, T_WIN_START, tzinfo=ET) + RANGE_CHECK_PAD
+        if at.timestamp() <= self.clock.timestamp_ns() / 1e9:
+            return                          # 已过去 (盘中启动/首日晚间 bar) → 不补
+        try:
+            self.clock.cancel_timer(RANGE_CHECK_TIMER)
+        except Exception:
+            pass
+        self.clock.set_time_alert(RANGE_CHECK_TIMER, at.astimezone(timezone.utc),
+                                  callback=self._on_range_check_timer, override=True)
+        self.timers_armed.append(("range_check", int(at.timestamp() * 1e9)))
+
+    def _on_range_check_timer(self, event) -> None:
+        d = self._now_et(event.ts_event).date()
+        if self.fsm.range_checked_day == d or self.fsm.entered_today:
+            return                          # FSM 的 bar 路径已判过 / 已入场 ⇒ 区间必然就绪
+        st = self.range_status(d)
+        if st == "ok":
+            self._log(f"[区间检查] {d} 区间就绪 "
+                      f"({self._rng_n}/{RANGE_BARS_EXPECTED} 根, "
+                      f"{self._rng_lo:.2f}~{self._rng_hi:.2f})")
+            return
+        got = f"{self._rng_n}/{RANGE_BARS_EXPECTED} 根" if st == "partial" else "0 根"
+        self._range_alert(f"{d} 入场窗口已开但盘前区间"
+                          f"{'残缺' if st == 'partial' else '缺失'} (实收 {got}; "
+                          f"bar 流可能已断) → 当日可能漏信号 / 区间偏窄")
+
+    def _range_alert(self, msg: str) -> None:
+        """区间就绪告警: error 进日志 + 桌面通知 (与 _atr_alert 同口径)。"""
+        self._log(f"[区间告警] {msg}", level="error")
+        notify_desktop("ORB live · 区间", msg)
 
     # ---------------- FsmCommands 实现 ----------------
     def submit_entry_market(self, side: str, qty: int, ref: str) -> None:
@@ -467,16 +527,14 @@ class OrbFsmLiveStrategy(FsmEnv, FsmCommands, Strategy):
             self._log(f"[bar] {hhmm:%H:%M} O={o:.2f} H={h:.2f} L={l:.2f} "
                       f"C={c:.2f} V={bar.volume.as_double():.0f}")
 
-        # ① 盘前区间累积 (env 数据源; FSM 只读结果)
+        # ① 盘前区间累积 (env 数据源; FSM 只读结果)。计数进 range_status: 残缺区间
+        #    要能点名 (旧版这里只查 None, 「6 根到了 2 根」查不出来)
         if T_RANGE_START <= hhmm < T_RANGE_END:
             self._rng_hi = h if self._rng_hi is None else max(self._rng_hi, h)
             self._rng_lo = l if self._rng_lo is None else min(self._rng_lo, l)
-            self._log(f"→ 区间 {self._rng_lo:.2f}~{self._rng_hi:.2f}")
-
-        # 窗口内区间仍为空 → 警示 (原版行为)
-        if (T_WIN_START <= hhmm < T_WIN_END and not self.fsm.entered_today
-                and self._rng_hi is None):
-            self._log("区间为空 (没收到盘前 bar?) —— 无法判突破", level="warning")
+            self._rng_n += 1
+            self._log(f"→ 区间 {self._rng_lo:.2f}~{self._rng_hi:.2f} "
+                      f"({self._rng_n}/{RANGE_BARS_EXPECTED})")
 
         # 持仓期进度日志 (原版 _log_position)
         if self.fsm.state == HOLD and self.be_ok(d, hhmm) and self.fsm.r_pts:

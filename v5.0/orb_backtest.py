@@ -39,7 +39,8 @@ from nautilus_trader.model.instruments import FuturesContract
 from nautilus_trader.model.objects import Money, Price, Quantity
 from nautilus_trader.trading.strategy import Strategy
 
-from orb_fsm import FLAT, FsmCommands, FsmEnv, FsmParams, OrbFsm
+from orb_fsm import (FLAT, RANGE_BARS_EXPECTED, FsmCommands, FsmEnv,  # noqa: E402
+                     FsmParams, OrbFsm)
 
 # ===========================================================================
 # 参数 (与原版「参数开关区」同值 —— parity 的前提)
@@ -129,18 +130,26 @@ def tick_round(px: float) -> float:
 # ===========================================================================
 # 数据管道 (与原版公式逐行一致; 每个文件只读一次)
 # ===========================================================================
-def build_range_map(eth_df: pd.DataFrame) -> dict[ddate, tuple[float, float]]:
-    """每日盘前区间 {date: (high, low)}。
+def build_range_map(eth_df: pd.DataFrame) -> tuple[dict[ddate, tuple[float, float]],
+                                                   dict[ddate, int]]:
+    """每日盘前区间 {date: (high, low)} + 每日实际参与计算的 bar 根数 {date: n}。
+
     右开写法 [9:00, 9:30) 配 <: 命中盘前 6 根 (09:00…09:25), 正确排除开盘首根
     (标签 09:30, 量 2.3 万手 vs 盘前数百手)。已验证边界敏感性: 只有「盘前 30 分钟、
-    右开」这一档成立, 相邻档全更差 (细节 notebook 持久结论 A)。"""
+    右开」这一档成立, 相邻档全更差 (细节 notebook 持久结论 A)。
+
+    根数回给 range_status: 少于 RANGE_BARS_EXPECTED = 区间残缺 (偏窄)。**只告警不改行为**
+    —— 静默用残缺区间是历史缺口 (3,627 天里 12 天), 但跳过这些天会改回测结果, 属策略
+    语义变更, 需单独决定 (notebook 记其影响 2019+ 口径 5 天 5 笔合计 -$1,343 ≈ -0.07%)。
+    """
     df = eth_df.tz_convert(ET)
     t = df.index.time
     df = df[(t >= T_RANGE_START) & (t < T_RANGE_END)]
-    out = {}
+    out, cnt = {}, {}
     for d, grp in df.groupby(df.index.normalize()):
         out[d.date()] = (float(grp["high"].max()), float(grp["low"].min()))
-    return out
+        cnt[d.date()] = len(grp)
+    return out, cnt
 
 
 def build_atr_map(rth_df: pd.DataFrame) -> dict[ddate, float]:
@@ -222,13 +231,14 @@ class OrbFsmConfig(StrategyConfig):
 class OrbFsmBacktestStrategy(FsmEnv, FsmCommands, Strategy):
     """继承两个端口基类: 漏实现任何端口方法 → 立即 NotImplementedError (不再静默)。"""
     def __init__(self, config: OrbFsmConfig, params: FsmParams,
-                 atr_map: dict, range_map: dict, day_last_bar: dict,
-                 et_lookup: dict):
+                 atr_map: dict, range_map: dict, range_counts: dict,
+                 day_last_bar: dict, et_lookup: dict):
         super().__init__(config)
         self.instrument_id = InstrumentId.from_str(config.instrument_id)
         self.bar_type = BarType.from_str(config.bar_type)
         self.atr_map = atr_map
         self.range_map = range_map
+        self.range_counts = range_counts
         self.day_last_bar = day_last_bar
         self.et_lookup = et_lookup
         # FSM 持有 self —— env/commands 都是这个适配层 (回测/live 差异全部收口在
@@ -257,6 +267,13 @@ class OrbFsmBacktestStrategy(FsmEnv, FsmCommands, Strategy):
 
     def range_for(self, d: ddate):
         return self.range_map.get(d)
+
+    def range_status(self, d: ddate) -> str:
+        """数据完整性只在**数据层**判: 区间缺行 → missing; 盘前 bar 数不足 → partial。
+        只驱动告警, 不改任何成交 (parity 红线)。"""
+        if self.range_map.get(d) is None:
+            return "missing"
+        return "ok" if self.range_counts.get(d, 0) >= RANGE_BARS_EXPECTED else "partial"
 
     def be_ok(self, d: ddate, t: dtime) -> bool:
         last = self.day_last_bar.get(d)
@@ -441,6 +458,8 @@ def print_stats(engine, strategy, sample_df):
     guards = (f.n_overnight_flattens + f.n_stop_replaces + f.n_timer_flattens
               + f.n_late_entry_flattens)
     print(f"===== 新防护触发次数 (干净数据必须=0): {guards} =====")
+    print(f"===== 数据就绪诊断 (仅告警不改行为): 区间缺失/残缺 {f.n_range_warned:,} 天 "
+          f"| ATR 不可用丢弃信号 {f.n_atr_missing_days:,} 天 =====")
     print(f"最终权益: ${final_total:,.2f}  总盈亏: ${final_total - STARTING_CAPITAL:,.2f}  "
           f"收益率: {(final_total / STARTING_CAPITAL - 1) * 100:,.1f}%")
     pf_str = "∞" if np.isinf(pf) else f"{pf:.2f}"
@@ -458,13 +477,15 @@ if __name__ == "__main__":
     t0 = walltime.perf_counter()
     rth = pd.read_parquet(DATA_PATH)
     eth = pd.read_parquet(RANGE_DATA_PATH)
-    range_map = build_range_map(eth)
+    range_map, range_counts = build_range_map(eth)
     atr_map = build_atr_map(rth)
     day_last_bar = build_day_last_bar_map(rth)
     et_lookup: dict = {}
     bars, instrument, bar_type, sample_df = build_bars_and_instrument(rth, et_lookup)
     t1 = walltime.perf_counter()
-    print(f"[数据] RTH {len(rth):,} 行 + ETH {len(eth):,} 行 → 区间 {len(range_map):,} 天 | "
+    n_partial = sum(1 for n in range_counts.values() if n < RANGE_BARS_EXPECTED)
+    print(f"[数据] RTH {len(rth):,} 行 + ETH {len(eth):,} 行 → 区间 {len(range_map):,} 天 "
+          f"(其中盘前 bar 数 ≠ {RANGE_BARS_EXPECTED} 的 {n_partial} 天, 区间残缺) | "
           f"ATR {len(atr_map):,} 天 | {len(bars):,} 根 Bar   ({t1 - t0:.1f}s)")
 
     engine = BacktestEngine(config=BacktestEngineConfig(
@@ -484,7 +505,7 @@ if __name__ == "__main__":
 
     strategy = OrbFsmBacktestStrategy(
         OrbFsmConfig(instrument_id=INSTRUMENT_ID, bar_type=str(bar_type)),
-        FSM_PARAMS, atr_map, range_map, day_last_bar, et_lookup)
+        FSM_PARAMS, atr_map, range_map, range_counts, day_last_bar, et_lookup)
     engine.add_strategy(strategy)
 
     t2 = walltime.perf_counter()

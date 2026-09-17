@@ -56,12 +56,13 @@ pixi run backtest
 
 | 命令 | 干什么 |
 |---|---|
-| `pixi run test` | 单测 11 组（秒级、零数据依赖） |
+| `pixi run test` | 单测 15 组（秒级、零数据依赖） |
 | `pixi run backtest` | 回测 → `v5.0/results/v5_trades_25000.csv` |
 | `pixi run verify` | live 验证网 A/B/C（与原版同引擎双跑逐笔比对） |
 | `pixi run live` | 实盘 / 纸面（默认 DRY_RUN；需先起 IB Gateway） |
 | `pixi run check-deps` | 校验 `pixi.toml` ↔ `v5.0/requirements.txt` 无版本漂移 |
 | `pixi run parity <基线.csv> <候选.csv>` | 逐笔 parity（默认基线是 2020/7R/10:30 口径，磁盘参数不同时必须显式给路径） |
+| `pixi run clean-check` / `pixi run clean` | 清理测试临时产物（dry-run / 真删）。白名单见 `clean_tmp.py`：只清 `__pycache__`、`.DS_Store`、`_verify_*.csv`/`.log`；**不碰** live 滑点与运行日志、环境/包缓存、`data/`、`results/`、任何 `.py` |
 | `pixi install -e research` | 只有要跑 `archive/` 里的画图/统计脚本时才需要（+matplotlib/scipy） |
 
 环境本体在 `.pixi/envs/default/bin/python`（已 gitignore；删掉 `pixi install` 就重建）。
@@ -181,7 +182,7 @@ cd v5.0
 
 ## 6. 实盘系统（v5.0）
 
-**架构**：FSM 核心 + IB 适配层；三层验证网全绿——回测逐笔 parity 全同（实验态 1,713 笔、锁定口径 1,951 笔，均与「archive 原版同参重跑」的基线分毫不差）、live 与归档原版同引擎双跑 A/B/C 逐笔全同、11 组状态机单测；全程 12.7s→10.0s（数据管道 ~5×）。
+**架构**：FSM 核心 + IB 适配层；三层验证网全绿——回测逐笔 parity 全同（实验态 1,713 笔、锁定口径 1,951 笔，均与「archive 原版同参重跑」的基线分毫不差）、live 与归档原版同引擎双跑 A/B/C 逐笔全同、15 组状态机单测；全程 12.7s→10.0s（数据管道 ~5×）。
 
 **v5.0 补齐的实盘防护**（旧版全部缺失）：
 

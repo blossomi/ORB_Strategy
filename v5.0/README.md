@@ -13,7 +13,7 @@
 | `orb_live.py` | live 主线：FSM 适配层 + IB 接入 + 滑点记录；**P1-1/P1-2/P2-1 已实现** + 三个原版没有的防护 |
 | `atr_source.py` | **live ATR 数据层（2026-09-16 起）**：NDX 指数日线 → 磁盘表 `data/ndx_daily.parquet`（多源补缺+交叉校验，禁混源）；Wilder 14日ATR 递推 + 假日语义 + 陈旧分层降级。live 收盘后 17:10 ET 定时更新、失败重试+桌面告警；启动/换日从表重算（**不再向 IB 请求日线**）。可独立跑：`python atr_source.py`（`--full` bootstrap / `--atr` / `--status`） |
 | `slippage_tracker.py` | 滑点记录（自持副本，源 = archive/live/） |
-| `test_fsm.py` | 12 组纯 FSM 单元测试（秒级，不需要引擎） |
+| `test_fsm.py` | 15 组纯 FSM 单元测试（秒级，不需要引擎） |
 | `test_atr_source.py` | ATR 数据层测试：递推公式对账 / 新鲜度 / 合并 append-only / 全源失败 / 引擎内 glue（表 ATR 驱动真实成交 + 重试 ladder） |
 | `verify_live.py` | 引擎内回归 A/B/C：v5.0 live vs 原版（archive/live）**同数据双跑逐笔 diff** |
 | `parity_check.py` | 回测逐笔 CSV 裁判：v5.0 输出 vs 归档原版基线（archive/ORB_strategy/html_output/v8_4_trades_25000.csv） |
@@ -31,7 +31,7 @@
 
 ```bash
 cd v5.0
-../.venv/bin/python test_fsm.py          # 单测 12 组（秒级）
+../.venv/bin/python test_fsm.py          # 单测 15 组（秒级）
 ../.venv/bin/python orb_backtest.py      # 回测 ~10s → results/v5_trades_25000.csv
 ../.venv/bin/python parity_check.py      # 逐笔 vs 归档基线（基线是 2020/7R/10:30 口径，
                                          #  磁盘参数变了必然 FAIL —— 见 §3）
@@ -78,6 +78,8 @@ cd v5.0
 | 止损单死亡 | 持仓中止损被撤/被拒/过期 | 无事件处理，静默裸奔 | 立即重挂 + error |
 | 迟到入场成交 | live 的 fill 在 EOD 后才到 | 挂已过期的止损单再裸奔 | 立即平仓 + 告警 |
 | 止损部分成交 | 超大手数分笔触发止损 | 出场计数虚增 | 部分只减仓，全成交才计一次 |
+| 数据就绪兜底 | bar 断流 → 区间缺失/残缺无人知晓 | 静默按残缺区间交易 (只查 None) | `range_check` 闹钟 (9:31 ET，与 bar 流解耦) + `range_status` 完整度点名；与 FSM 的 `on_bar` 诊断以 `range_checked_day` 互斥 |
+| ATR 静默丢弃 | ATR 不可用 → 当日不开仓 | 零日志，看起来像"今天没信号" | 每日首报一次 error (`n_atr_missing_days` 计数) |
 
 **实测彩蛋**（重构有效性的现场证据）：2020-02-17 总统日半日市不在旧版硬编码 `HALF_DAYS`
 里——旧版会持仓裸奔到 18:00 夜盘 bar 才平（-$863），v5.0 的 P1-1 闹钟 16:00:02 平掉

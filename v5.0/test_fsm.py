@@ -68,8 +68,9 @@ class FakeCmds(FsmCommands):
 
 class FakeEnv(FsmEnv):
     def __init__(self, equity=1_000_000.0, atr=100.0, rng=(200.0, 100.0),
-                 last=time(15, 55)):
+                 last=time(15, 55), rng_status=None):
         self._equity, self._atr, self._rng, self.last = equity, atr, rng, last
+        self._rng_status = rng_status       # None → 基类默认 (按 rng 二分)
         self.flat_called = False           # be_ok/flatten_now 只允许各一次语义由调用方保证
 
     def equity(self):
@@ -80,6 +81,9 @@ class FakeEnv(FsmEnv):
 
     def range_for(self, d):
         return self._rng
+
+    def range_status(self, d):
+        return self._rng_status or super().range_status(d)
 
     def be_ok(self, d, t):
         return t < self.last
@@ -348,6 +352,60 @@ def test_no_atr_no_quota():
     bar(f, time(9, 35), o=202.0, h=207.0, l=201.0, c=206.0)
     assert f.n_signals == 0
     print("  no-ATR no-quota OK")
+
+
+def test_range_missing_diagnostic_once_per_day():
+    """区间缺失: 每日只在窗口首根报一次 error (断线不刷屏), 不占名额, 换日重新可报。"""
+    class NoRangeEnv(FakeEnv):
+        def range_for(self, d):
+            return None
+
+        def range_status(self, d):
+            return "missing"
+    f, c = make(env=NoRangeEnv())
+    for t in (time(9, 30), time(9, 35), time(9, 40)):
+        bar(f, t, o=201.0, h=206.0, l=200.5, c=205.0)
+    warns = [x for x in c.calls if x[0] == "log" and "range_status=missing" in
+             x[1].get("msg", "")]
+    assert len(warns) == 1, f"每日只报一次, 实际 {len(warns)}"
+    assert warns[0][1]["level"] == "error"
+    assert "range_status=missing" in warns[0][1]["msg"]
+    assert f.n_range_warned == 1 and not f.entered_today and f.n_signals == 0
+    # 换日 → 重新可报 (守卫 key 在日期上)
+    bar(f, time(9, 30), o=150.0, h=151.0, l=149.0, c=150.0, d=date(2026, 9, 16))
+    assert f.n_range_warned == 2, "新的一天应重新评估"
+    print("  range missing diagnostic (once/day) OK")
+
+
+def test_range_partial_warns_but_does_not_change_behavior():
+    """区间残缺 (bar 数不足): warning 级告警, 但**不改行为** —— 仍按该区间判突破入场。
+    跳过残缺日 = 策略语义变更, 需单独决定 (见 orb_backtest.build_range_map 注释)。"""
+    f, c = make(env=FakeEnv(equity=20_000.0, rng_status="partial"), sync_fill_px=205.0)
+    bar(f, time(9, 30), o=201.0, h=206.0, l=200.5, c=205.0)
+    warns = [x for x in c.calls if x[0] == "log" and x[1].get("level") == "warning"
+             and "残缺" in x[1].get("msg", "")]
+    assert len(warns) == 1, warns
+    assert f.n_range_warned == 1
+    assert f.n_entries == 1, "残缺只告警, 不得改行为 (parity 红线)"
+    print("  range partial warn-only OK")
+
+
+def test_atr_missing_logged_once():
+    """ATR 不可用: 每日首报 error (旧版零日志 → 数据层挂了看起来像"今天没信号")。"""
+    f, c = make(env=FakeEnv(atr=None))
+    for t in (time(9, 30), time(9, 35), time(9, 40)):
+        bar(f, t, o=201.0, h=206.0, l=200.5, c=205.0)
+    errs = [x for x in c.calls if x[0] == "log" and x[1].get("level") == "error"
+            and "ATR 不可用" in x[1].get("msg", "")]
+    assert len(errs) == 1, f"每日只报一次, 实际 {len(errs)}"
+    assert f.n_atr_missing_days == 1
+    assert f.n_signals == 0 and not f.entered_today, "ATR 缺失不占当日名额 (原版行为)"
+    # 次日 ATR 恢复 → 信号正常发出, 不再新增告警 (无 sync_fill ⇒ 停在 PENDING)
+    f.env._atr = 100.0
+    bar(f, time(9, 30), o=201.0, h=206.0, l=200.5, c=205.0, d=date(2026, 9, 16))
+    assert f.n_signals == 1 and f.state == PENDING
+    assert f.n_atr_missing_days == 1
+    print("  ATR missing logged (once/day) OK")
 
 
 if __name__ == "__main__":

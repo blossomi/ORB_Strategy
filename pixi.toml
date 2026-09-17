@@ -64,3 +64,6 @@ live = "python v5.0/orb_live.py"
 verify = "python v5.0/verify_live.py A && python v5.0/verify_live.py B && python v5.0/verify_live.py C"
 check-deps = "python check_env_sync.py"
 parity = "python v5.0/parity_check.py"
+# 清理测试/验证产物 (白名单, 见 clean_tmp.py 头注: 不碰 live 滑点/日志/环境缓存/data/results)
+clean-check = "python clean_tmp.py"
+clean = "python clean_tmp.py --yes"
