@@ -14,7 +14,9 @@ verify_live.py — v5.0 live (orb_live) 的引擎内回归
 用法: ../.venv/bin/python verify_live.py [A|B|C]
 """
 import os
+import shutil
 import sys
+import tempfile
 from datetime import time as dtime
 from pathlib import Path
 
@@ -56,6 +58,18 @@ CAND.SLIP_CSV = f"_verify_cand_{scope}.csv"
 for p in (L.SLIP_CSV, CAND.SLIP_CSV):
     if os.path.exists(p):
         os.remove(p)
+
+# 回放日志同样不许落进**审计目录** (2026-09-17 修): 两个 live 适配层的 LOG_DIR 分别是
+# v5.0/logs (实盘运行日志) 与 archive/live/logs; 本脚本跑的是引擎内回放 (窗口 2020/2022/
+# 2025), 日志落进去 = orb-monitor 把回放当实盘逐笔成交导入 (实锤: 4 次 verify 攒出
+# 748 笔假交易 / 45 个假日志, 与滑点 CSV 同一类污染)。重定向到临时目录, 结尾断言两个
+# 真实日志目录零新增; 失败时保留临时目录并打印路径供排查。
+_VERIFY_LOG_DIR = tempfile.mkdtemp(prefix=f"orb_verify_logs_{scope}_")
+L.LOG_DIR = CAND.LOG_DIR = _VERIFY_LOG_DIR
+L._log_path = CAND._log_path = None          # flog 首调才建文件, 清掉旧进程缓存路径
+_REAL_LOG_DIRS = [os.path.join(HERE, "logs"),
+                  str(Path(HERE).parent / "archive" / "live" / "logs")]
+_LOGS_BEFORE = {d: sorted(os.listdir(d)) if os.path.isdir(d) else [] for d in _REAL_LOG_DIRS}
 
 DATA_DIR = os.path.join(HERE, "data")      # v5.0 自持数据 (与 orb_backtest 同源)
 df = pd.read_parquet(os.path.join(DATA_DIR, "nq_5min_eth.parquet")).tz_convert(L.ET)
@@ -300,6 +314,21 @@ else:
         fails += 0 if okc else 1
     else:
         print("[C] (半日市当天无 EOD 平仓 —— 未持仓或早盘已止损; parity 已由逐笔 diff 覆盖)")
+
+# 审计目录零写入断言 (回放日志不许落进实盘/归档日志目录)
+leaked = {d: sorted(set(os.listdir(d)) - set(_LOGS_BEFORE[d]))
+          for d in _REAL_LOG_DIRS if os.path.isdir(d)}
+leaked = {d: v for d, v in leaked.items() if v}
+print(f"\n[{scope}] 回放日志 → {_VERIFY_LOG_DIR}")
+if leaked:
+    print(f"!! 回放日志泄漏到审计目录 (会污染 orb-monitor 的逐笔成交源): {leaked}")
+    fails += 1
+else:
+    print("✔ 审计目录零写入 (v5.0/logs 与 archive/live/logs 无新增文件)")
+if fails == 0:
+    shutil.rmtree(_VERIFY_LOG_DIR, ignore_errors=True)
+else:
+    print(f"回放日志保留在 {_VERIFY_LOG_DIR} 供排查")
 
 print(f"\n{'='*50}\n{'✔ 全部通过' if fails == 0 else f'!! {fails} 项 FAIL'}")
 sys.exit(0 if fails == 0 else 1)

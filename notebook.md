@@ -16,6 +16,7 @@
 - **实盘主线**：`v5.0/orb_live.py`，合约 MNQZ6（下次换月 ~2026-12-10 → H7）。**旧 TODO·P 已完成**：P1-1 EOD 闹钟 / P1-2 隔夜残留强平 / P2-1 止损 GTD / P2-2 D、E 组回归（= verify_live.py）全落地，另加 3 个新防护（止损死亡重挂 / 迟到成交平仓 / 部分止损减仓）+ 1 个数据就绪兜底（`range_check` 闹钟，2026-09-17）
 - **下一步（按序）**：① DRY_RUN 在 v5.0/orb_live.py 上重启 5 天（`caffeinate -s`；旧 P2-3 bar 节奏核对依旧适用；操作手册 = archive/live/OPERATIONS.md；前置链 fund≥$500 → 权限 → CME 订阅）→ paper 5 天 → MNQ 真单 30 笔收滑点 → 校准放大
 - **cTrader 通道**：`archive/ctrader/`（ORB v8.4 的 C# cBot）源码完成、本地编译零警告；**卡在 cTID 凭据**；其 2 个 P1 对应 v5.0 FSM 的 on_new_day 刷新与出场显式化，续作时抄 FSM 迁移表。见持久结论 F。
+- **验证链隔离（2026-09-17）**：test/verify 在引擎内跑回放时已强制重定向滑点落盘与运行日志，并断言审计目录零写入（见持久结论 E）；`v5.0/live_slippage.csv` 与 `v5.0/logs/` 现为**空态**（无真实实盘数据），DRY_RUN 重启后从空态开始积累
 - **研究待办**（见持久结论 D）：~~名义杠杆帽实验~~（2026-09-17 完成，见持久结论 A）/ 双入场同口径 A/B / ES+NQ 组合权益曲线
 - **最后更新**：2026-09-17
 
@@ -170,6 +171,7 @@
 
 - 目录（**2026-09-15 重组后**）：`v5.0/`=唯一主线（FSM 架构：orb_fsm.py 核心 + 回测/live 适配层 + data/ 自持 NQ 两件套）｜`archive/`=旧世界全量归档（ORB_strategy / live / GLM_working / ctrader / propfirm 同层搬入，**相对几何保留**，旧脚本 `../ORB_strategy` 类引用全部仍解析；内含 33 项 v1-v8.5 版本史与 html_output 逐笔基线）｜`notebook.md`=本文件
 - 工作区（**2026-09-17 用户改名**）：本仓库本地文件夹 `Deepseek_Harness` → **`orb-strategy`**（GitHub 远仓名未变）；同级 `orb-monitor/` 的默认数据根已同步（`../orb-strategy/v5.0`）。orb-monitor 前端工具链同日 npm→deno（见其仓库 README/tech-stack）
+- **审计文件零写入纪律（2026-09-17；事故现场见变更日志同日）**：`v5.0/live_slippage.csv` 与 `v5.0/logs/*.log` 是**实盘审计底稿**（orb-monitor 只读消费：CSV → 滑点/汇总页，logs → 逐笔成交与失效指标）。任何在引擎内跑**真实 live 适配层**的测试/回归（`test_atr_source` 用例 5/6、`verify_live`）必须先把 `SLIP_CSV`/`LOG_DIR` 重定向到临时目录，并断言真实文件/目录**零写入**（已实装：单测指纹断言 + verify 目录清单断言，随验证链每次跑）。副产品：审计目录只会出现真实运行数据，`v5.0/logs` 空态 = 尚未跑过真单。
 - 弃用 build_TVchart.py（回测+图表+策略描述已整合进单脚本）
 - **移动代码后必须 grep 相对路径 + 从新位置跑入口验证**（import smoke test 查不出 cwd 相对路径断裂）——2026-09-15 重组时全链重跑验证过
 - 技术路线（用户决定）：IB 期货实盘 → NautilusTrader；cTrader CFD → C# cBot；实盘验证标的 **MNQ**（2026-09-12 起，因 $25k 资金颗粒度从 NQ 切换；更早笔记写「实盘验证 NQ」已过期）
@@ -260,3 +262,4 @@
 - 2026-09-17：**新增清理命令 `clean_tmp.py` + `pixi run clean|clean-check`**（根级 stdlib 脚本，白名单对齐 `.gitignore` 已声明的可丢弃项）：只清 `__pycache__`/`*.pyc`、`.DS_Store`、`_verify_*.csv`、`_verify_*.log`、`$TMPDIR/slip_selftest.csv`；默认 dry-run，`--yes`/`pixi run clean` 才真删。**刻意保留**（删了会疼）：live 滑点与运行日志（审计底稿）、环境与包缓存、`data/`、`results/`、**全部 `.py`**（`archive/**/_verify_*.py` 是源码不是产物 → 只按输出后缀匹配）。实测：首次清 25 项/1.0MB，二次报「已是干净态」（幂等），`git status` 无任何 `D` 行、测试清理后仍 15+7 组全绿。
 - 2026-09-17：**数据就绪诊断层实装（代码审查驱动，零行为变化）**：① 新增端口 `FsmEnv.range_status`（`ok`/`partial`/`missing`）+ `atr_status`，回测按每日盘前 bar 根数（`build_range_map` 多回一张计数表）判残缺、live 按在场计数判；② FSM 侧诊断重构——守卫从 `not entered_today` 里**提出**（只 key 在 `d` 上）、`range_for` 每根 bar 只取一次（旧版同 bar 调两次）、修掉「当日放弃突破判定」的假文案（实际逐根重取区间，稍后就绪仍会入场）；③ **补 ATR 静默缺口**：`_signal` 里 `atr is None → return` 原本零日志（数据层挂了长得像「今天没信号」），现每日首报一次 error；④ live 加**与 bar 流解耦**的 `range_check` 闹钟（9:31 ET：窗口开后 1min），以 `range_checked_day` 与 FSM 诊断互斥——FSM 没看到窗口（断线）才由闹钟报警；⑤ 删掉 `orb_live` 里逐根刷屏的重复 warning。
 - 2026-09-17：**验证全绿**：单测 15 组（FSM，+3 组就绪诊断）+ 7 组（ATR/glue，+1 组闹钟分支覆盖）；回测参照值**逐字复现**（1,444 笔 / $557,563 / 73.3% / MDD -27.9% / Sharpe 1.50 / 新防护 0）；`verify_live A/B/C` 逐笔 parity 全同（A 64 / B 32 / C 27 笔，无杂散告警/桌面通知）。新增诊断在 2021 起口径报 0 天（残缺日全在窗口外或 Good Friday 休市），2020-03 熔断 5 天本可逐日命中（见持久结论 A「已知数据缺口」）。
+- 2026-09-17：**修「测试/回归污染实盘审计文件」bug（数据完整性，工程侧）**：`test_atr_source` 引擎用例 5/6 把假滑点 append 进 `v5.0/live_slippage.csv`（实测 6 次 `pixi run test` = 252 行 2021 年假数据、零真实行 —— 该文件是 orb-monitor 的实盘滑点源）；`verify_live` 引擎回放日志落进 `v5.0/logs`，被 monitor 当实盘逐笔成交导入（实测 4 次 verify = 748 笔假交易 / 58 个假日志）。两处均改为重定向临时目录 + 「审计目录零写入」断言（装进验证链），存量假数据与 monitor 库已清空。

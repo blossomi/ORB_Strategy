@@ -12,8 +12,12 @@ test_atr_source.py — atr_source 模块 + orb_live ATR glue 的常设测试 (�
       + 更新失败重试 ladder (3 次后 [ATR告警])
 前置: data/ndx_daily.parquet 存在 (缺则先跑 `python atr_source.py`)。
 用法: cd v5.0 && ../.venv/bin/python test_atr_source.py
+纪律: 本文件在模块导入时把 orb_live 的滑点落盘重定向到临时文件, 并对真实审计文件做
+      「零写入」指纹断言 (见「0 隔离纪律」) —— 用例 5/6 跑的是真实 live 适配层。
 """
+import hashlib
 import json
+import shutil
 import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -31,6 +35,40 @@ _PASSED = []
 def ok(name):
     _PASSED.append(name)
     print(f"[test_{name}] OK")
+
+
+# ---------------------------------------------------------------- 0 隔离纪律
+# ⚠️ 用例 5/6 在引擎内跑**真实** OrbFsmLiveStrategy, 其滑点落盘默认 = 脚本目录下的
+#    live_slippage.csv —— 那是**实盘审计文件** (orb-monitor 只读消费它当实盘滑点源)。
+#    单测往里 append 假行 = 污染实盘滑点与失效监控指标。
+#    实锤 (2026-09-17): 6 次 `pixi run test` 攒出 252 行 2021 年假滑点, 占满整个文件
+#    且零真实数据; SLIP_CSV 锚定脚本目录后, 测试写的正是实盘落盘路径。
+#    口径照 verify_live.py: 测试用独立文件; 真实文件全程只比指纹, 零写入。
+import orb_live as ol  # noqa: E402  (必须先 import 到模块对象, 才能重定向它的落盘路径)
+
+
+def _fingerprint(path: Path):
+    """(存在, 字节数, mtime_ns, sha1) —— 用来断言「没碰真实产物文件」。"""
+    if not path.exists():
+        return (False, 0, 0, "")
+    st = path.stat()
+    return (True, st.st_size, st.st_mtime_ns,
+            hashlib.sha1(path.read_bytes()).hexdigest())
+
+
+_REAL_SLIP_CSV = Path(ol.SLIP_CSV)                  # 实盘审计文件 (本进程对它零写入)
+_SLIP_BEFORE = _fingerprint(_REAL_SLIP_CSV)
+_SLIP_TMP_DIR = Path(tempfile.mkdtemp(prefix="orb_slip_test_"))
+_TMP_SLIP_CSV = _SLIP_TMP_DIR / "live_slippage.csv"
+ol.SLIP_CSV = str(_TMP_SLIP_CSV)
+
+
+def assert_real_slip_csv_untouched(who: str) -> None:
+    """断言实盘滑点审计文件全程未被测试写过 (被写 = 测试污染实盘数据, 必须改代码)。"""
+    after = _fingerprint(_REAL_SLIP_CSV)
+    assert after == _SLIP_BEFORE, (
+        f"[{who}] ⚠️ 测试污染了实盘审计文件 {_REAL_SLIP_CSV}\n"
+        f"  跑前 {_SLIP_BEFORE}\n  跑后 {after}")
 
 
 # ---------------------------------------------------------------- 1 递推公式
@@ -163,6 +201,10 @@ def test_live_glue():
     # 收盘更新闹钟: 恰好登记 1 次
     assert sum(1 for name, _ in s.timers_armed if name == "atr_update") == 1, \
         f"收盘更新闹钟应登记 1 次: {s.timers_armed}"
+    # 重定向生效性 (重定向被绕过时上面所有断言照样绿 —— 必须正面证明滑点落了临时文件)
+    assert _TMP_SLIP_CSV.exists() and _TMP_SLIP_CSV.stat().st_size > 0, \
+        f"滑点未落到临时文件 {_TMP_SLIP_CSV} —— SLIP_CSV 重定向失效?"
+    assert_real_slip_csv_untouched("live_glue_engine")
     ok("live_glue_engine")
 
     # 5b 更新失败 ladder: 3 次失败 → [ATR告警] + 计数复位; 成功 → 复位
@@ -192,6 +234,7 @@ def test_live_glue():
                 f"  {lv} {m}" for lv, m in strat_logs[-8:])
     finally:
         orb_live.update_table = orig_upd
+    assert_real_slip_csv_untouched("live_glue_ladder")
     ok("live_glue_ladder")
 
 
@@ -285,6 +328,7 @@ def test_live_range_check_timer():
     finally:
         ol.notify_desktop = orig_notify
     engine.dispose()
+    assert_real_slip_csv_untouched("live_range_check_timer")
     ok("live_range_check_timer")
 
 
@@ -295,4 +339,7 @@ if __name__ == "__main__":
     test_update_all_fail()
     test_live_glue()
     test_live_range_check_timer()
+    # 收尾: 真实滑点审计文件全程零写入 (上面每个引擎用例都各自断言过一次)
+    assert_real_slip_csv_untouched("跑完整个文件")
+    shutil.rmtree(_SLIP_TMP_DIR, ignore_errors=True)
     print(f"\n全部 {len(_PASSED)} 组用例通过 ✔")
