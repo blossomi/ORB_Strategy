@@ -482,6 +482,14 @@ funded 27 笔档月均 +23%）；② Labs 最优档（A-14笔）月净与 5×Luc
 近乎永动的低风险结构（$2,095/月 × 4.4 年）。**购买 Labs 前必须后台确认 MLL=$0
 的精确语义**（消失 vs 冻结在起始——后者会让 A27 爆仓率大增）与 payout 赢利日条款。
 
+### 7.7 Topstep Labs $6K Challenge 两轮考试（`topstep6k/`，2026-09-18）
+
+Labs #005（$149 一次性，90 天寿命，无 reset）：两轮各 +$6,000、$0 起始、静态 MLL -$2,000、
+无 DLL/consistency、10 micro 帽 → 固定 $6,000 出金。**出金率 6-10%**（最优 1R=$400 以损定仓：
+eod 9.5% / 盘中 6.3%，EV +$230~+420/号，E[门票到出金] $1,562+）；R1 进关 ~41% 但 R2
+通过仅 18-23%（~70% 死在第二轮）；regime 决定一切（2022 年 25-28% vs 2019-2021 与
+2025 年 0-4%）。目标/带宽比 3.0 = §6.3 硬标准里最苛刻档。细节与表格 = `topstep6k/README.md`。
+
 ### 7.5 LucidFlex $50K「生存 14 笔」档（`prop_lucid50k_r14.py`，2026-09-13）
 
 把 Labs 胜出的模式 A 移植回 LucidFlex $50K：**1R = MLL $2,000÷14 ≈ $143 恒定**
@@ -601,6 +609,7 @@ funded 27 笔档月均 +23%）；② Labs 最优档（A-14笔）月净与 5×Luc
 | `prop_full_journey.py` | 单一连续路径全程账（考核↔funded 状态机循环 2019→2026） |
 | `prop_scale_compare.py` | 放大规模对比：复制 vs 等比大账号 vs 裸加手数 |
 | `prop_quarterly.py` | 单路径现金流按季度分解（payout / 考核费 / reset / 月费 / 净） |
+| `topstep6k/` | **Topstep Labs $6K Challenge**（两轮 +$6,000 / 静态 -$2,000 / 90 天）：出金率 6-10%，结论权威 = `topstep6k/README.md` |
 | `prop_lucid25k.py` | LucidFlex $25K 两阶段设计（考核 q 阶梯 10 日窗 / funded q=1 / 联合经济账） |
 | `results/quarterly_lucidflex_q2.csv` / `quarterly_topstep_q2.csv` | 季度账本明细 |
 | `prop_fixed_stop_wf.py` | 固定止损 Walk-Forward（3训1测×5窗口）+ 9 档边界敏感性 |
