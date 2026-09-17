@@ -30,3 +30,5 @@ v5.0/_verify_cand_*.csv
 archive/live/logs/
 archive/live/live_slippage*.csv
 archive/live/_verify_live_*.csv
+
+archive/propfirm/

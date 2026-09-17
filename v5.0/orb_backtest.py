@@ -307,8 +307,7 @@ class OrbFsmBacktestStrategy(FsmEnv, FsmCommands, Strategy):
         self.modify_order(self._stop_order, quantity=Quantity(qty, 0))
 
     def modify_stop_trigger(self, trigger: float) -> None:
-        self.modify_order(self._stop_order,
-                          trigger_price=Price(trigger, PRICE_PRECISION))
+        self.modify_order(self._stop_order, trigger_price=Price(trigger, PRICE_PRECISION))
 
     def cancel_all(self) -> None:
         self.cancel_all_orders(self.instrument_id)
